@@ -166,6 +166,10 @@ a { color: var(--accent); }
     <h2>Players <span class="count" id="peerCount"></span></h2>
     <ul class="peers" id="peers"></ul>
     <div class="empty" id="noPeers">Nobody else is online yet.</div>
+    <div id="gamesBox" class="hidden" style="margin-top:14px">
+      <div class="peer-sub" style="font-weight:600">Warcraft III games on the network</div>
+      <ul class="peers" id="games"></ul>
+    </div>
   </section>
 
   <!-- Share -->
@@ -196,6 +200,7 @@ a { color: var(--accent); }
       <summary>Game not showing up?</summary>
       <ul>
         <li>Restart the game <i>after</i> connecting the VPN.</li>
+        <li>When a friend hosts a game, it appears under <b>Warcraft III games on the network</b> in the Players box. If it shows there but not in the game, allow Warcraft III / Frozen Throne in Windows Firewall (Private and Public).</li>
         <li>Watch <b>LAN game broadcasts</b> under My connection while you're on the game's LAN screen. Both numbers should go up on both PCs. If <b>sent</b> stays the same, Windows is sending the game's broadcasts to another network adapter: disable other VPN adapters (Hamachi, Radmin VPN, ZeroTier) in Network Connections and restart the game.</li>
         <li>Allow the game in Windows Firewall when asked (tick both Private and Public).</li>
         <li>Disconnect other VPN programs (Hamachi, Radmin, ZeroTier) while playing.</li>
@@ -391,6 +396,27 @@ function renderPeers(st) {
   }));
 }
 
+function renderGames(st) {
+  const games = (st.running && st.client && st.client.games) || [];
+  const names = {};
+  for (const p of (st.client && st.client.peers) || []) names[p.ip] = p.name;
+  $("gamesBox").classList.toggle("hidden", games.length === 0);
+  $("games").replaceChildren(...games.map((g) => {
+    const li = document.createElement("li");
+    const main = document.createElement("div");
+    main.className = "peer-main";
+    const n = document.createElement("div");
+    n.className = "peer-name";
+    n.textContent = g.name || "(unnamed game)";
+    const sub = document.createElement("div");
+    sub.className = "peer-sub";
+    sub.textContent = "hosted by " + (names[g.host] || g.host) + " (" + g.host + ") · " + g.version;
+    main.append(n, sub);
+    li.append(main);
+    return li;
+  }));
+}
+
 function render(st) {
   lastState = st;
   $("version").textContent = "v" + st.version;
@@ -447,6 +473,7 @@ function render(st) {
     $("pfWarn").textContent = h.warning || "";
   }
   renderPeers(st);
+  renderGames(st);
 
   const sh = st.share;
   if (!shareDirty && document.activeElement !== $("shareFolder")) {

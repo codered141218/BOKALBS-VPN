@@ -50,6 +50,7 @@ type Config struct {
 	ListenPort int    // local UDP port, 0 = any
 	AppVersion string
 	RelayOnly  bool // never try direct peer-to-peer connections
+	NoW3Helper bool // don't search other members for Warcraft III games
 
 	// When Server is empty the host is found through this rendezvous
 	// service (see package rendezvous), so nobody needs port forwarding.
@@ -96,6 +97,9 @@ type Status struct {
 	// to see whether games such as Warcraft III can find each other.
 	BroadcastsSent     uint64 `json:"broadcastsSent"`
 	BroadcastsReceived uint64 `json:"broadcastsReceived"`
+
+	// Warcraft III LAN games other members are hosting right now.
+	Games []GameSeen `json:"games"`
 }
 
 type peer struct {
@@ -155,6 +159,7 @@ type Client struct {
 	peers        map[uint32]*peer
 	peersByIP    map[netip.Addr]*peer
 	peersVersion uint64
+	games        map[string]*gameSeen
 
 	configCh chan *proto.Control
 	lostCh   chan struct{}
@@ -238,6 +243,15 @@ func (c *Client) Status() Status {
 		}
 		st.Peers = append(st.Peers, ps)
 	}
+	st.Games = []GameSeen{}
+	for k, g := range c.games {
+		if now.Sub(g.at) > gameSeenFor {
+			delete(c.games, k)
+			continue
+		}
+		st.Games = append(st.Games, g.GameSeen)
+	}
+	sort.Slice(st.Games, func(i, j int) bool { return st.Games[i].Host+st.Games[i].Name < st.Games[j].Host+st.Games[j].Name })
 	sort.Slice(st.Peers, func(i, j int) bool {
 		a, _ := netip.ParseAddr(st.Peers[i].IP)
 		b, _ := netip.ParseAddr(st.Peers[j].IP)
@@ -530,7 +544,7 @@ func drainCfg(ch chan *proto.Control) {
 func (c *Client) connected(ctx context.Context) error {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
-	var lastPing, lastKeep time.Time
+	var lastPing, lastKeep, lastSearch time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -555,6 +569,10 @@ func (c *Client) connected(ctx context.Context) error {
 				c.sendServer(proto.KindControl, (&proto.Control{Type: proto.MsgKeep}).Marshal())
 			}
 			c.punch(now)
+			if !c.cfg.NoW3Helper && now.Sub(lastSearch) >= w3SearchPeriod {
+				lastSearch = now
+				c.searchW3Games()
+			}
 		}
 	}
 }
@@ -890,6 +908,8 @@ func (c *Client) deliver(pkt []byte, wantSrc netip.Addr) {
 		if !proto.IsSystemChatter(pkt) {
 			c.bcastIn.Add(1)
 		}
+	} else {
+		c.noteW3Game(pkt)
 	}
 	_ = dev.WritePacket(pkt)
 }

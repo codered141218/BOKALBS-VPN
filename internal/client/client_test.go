@@ -387,3 +387,46 @@ func TestJoinWithoutServerAddress(t *testing.T) {
 	a.toNet <- udpPacket(a.addr.Addr(), proto.LastAddr(a.addr), 6112, "found you")
 	expectPacket(t, b, "found you")
 }
+
+func TestWarcraftHelperFindsGames(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr := startServer(t, ctx)
+	host := join(t, ctx, addr, "host", "host-pc", "hunter2", false)
+	friend := join(t, ctx, addr, "friend", "friend-pc", "hunter2", false)
+	for _, m := range []*member{host, friend} {
+		waitFor(t, "connected", 10*time.Second, func() bool {
+			st := m.c.Status()
+			return st.State == client.StateConnected && len(st.Peers) == 1
+		})
+	}
+	hd, fd := host.device(t), friend.device(t)
+
+	// The friend's app asks the host's game (port 6112) for games, for
+	// Frozen Throne 1.26 among other versions, as if from the friend's game.
+	deadline := time.After(10 * time.Second)
+	found := false
+	for !found {
+		select {
+		case p := <-hd.fromNet:
+			src, _ := proto.IPv4Src(p)
+			if len(p) == 28+16 && src == fd.addr.Addr() && p[22] == 0x17 && p[23] == 0xe0 && // dst port 6112
+				p[28] == 0xF7 && p[29] == 0x2F && string(p[32:36]) == "PX3W" && p[36] == 26 {
+				found = true
+			}
+		case <-deadline:
+			t.Fatal("no Warcraft III search reached the host")
+		}
+	}
+
+	// The host's game answers with its game info; the friend's app sees it.
+	info := []byte{0xF7, 0x30, 0, 0, 'P', 'X', '3', 'W', 26, 0, 0, 0, 1, 0, 0, 0, 9, 9, 9, 9}
+	info = append(info, "DotA LoD 6.83\x00"...)
+	info[2] = byte(len(info))
+	hd.toNet <- udpPacket(hd.addr.Addr(), fd.addr.Addr(), 6112, string(info))
+	expectPacket(t, fd, string(info))
+	waitFor(t, "game listed", 5*time.Second, func() bool {
+		g := friend.c.Status().Games
+		return len(g) == 1 && g[0].Name == "DotA LoD 6.83" && g[0].Host == hd.addr.Addr().String() && g[0].Version == "TFT 1.26"
+	})
+}
