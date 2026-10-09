@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOKALBS VPN</title>
+<style>
+:root {
+  --bg: #f3f5f9; --panel: #ffffff; --panel-2: #f7f8fb; --fg: #161b26; --muted: #5d6676;
+  --line: #e2e6ee; --accent: #3b5bfd; --accent-fg: #ffffff; --accent-soft: #e8edff;
+  --ok: #138a4b; --ok-soft: #e3f6ec; --warn: #a15c00; --warn-soft: #fff3df; --bad: #c4314b; --bad-soft: #fde8ec;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 4px 16px rgba(16,24,40,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1118; --panel: #171b25; --panel-2: #1d2230; --fg: #e9ecf3; --muted: #9aa3b5;
+    --line: #2a3142; --accent: #6d87ff; --accent-fg: #0b0e15; --accent-soft: #232b48;
+    --ok: #45d08a; --ok-soft: #173426; --warn: #f2b14c; --warn-soft: #3a2c13; --bad: #ff7d93; --bad-soft: #3d1a22;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+body { font: 14px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+.logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, #3b5bfd, #9b5cff); display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px; }
+header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+header .ver { color: var(--muted); font-size: 12px; }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.pill.warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+.pill.bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+main { max-width: 1040px; margin: 0 auto; padding: 20px 16px 40px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 760px) { main { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; box-shadow: var(--shadow); min-width: 0; }
+.card.wide { grid-column: 1 / -1; }
+.card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.card h2 .count { color: var(--muted); font-weight: 500; }
+label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 4px; }
+input[type=text], input[type=password], input[type=number] { width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font: inherit; }
+input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.check { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-size: 13px; color: var(--fg); font-weight: 500; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { min-width: 0; }
+.grow { flex: 1; }
+button { font: inherit; font-weight: 600; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); padding: 8px 14px; cursor: pointer; white-space: nowrap; }
+button:hover { filter: brightness(.97); }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+button.danger { color: var(--bad); }
+button.small { padding: 4px 10px; font-size: 12px; }
+button:disabled { opacity: .55; cursor: default; }
+.tabs { display: flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 3px; gap: 3px; margin-bottom: 6px; }
+.tabs button { flex: 1; border: 0; background: transparent; color: var(--muted); }
+.tabs button.on { background: var(--panel); color: var(--fg); box-shadow: var(--shadow); }
+.hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.msg { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+.msg.bad { background: var(--bad-soft); color: var(--bad); }
+.msg.warn { background: var(--warn-soft); color: var(--warn); }
+.msg.ok { background: var(--ok-soft); color: var(--ok); }
+.msg:empty { display: none; }
+.big { font-size: 28px; font-weight: 700; letter-spacing: .5px; font-variant-numeric: tabular-nums; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin-top: 10px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.invite { background: var(--accent-soft); border-radius: 10px; padding: 12px 14px; margin-top: 14px; }
+.invite code { font: 600 15px/1.4 Consolas, ui-monospace, monospace; overflow-wrap: anywhere; }
+.peers { list-style: none; margin: 0; padding: 0; }
+.peers li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.peers li:first-child { border-top: 0; }
+.avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; color: #fff; flex: none; }
+.peer-main { flex: 1; min-width: 140px; }
+.peer-name { font-weight: 600; overflow-wrap: anywhere; }
+.peer-sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.badge.direct { background: var(--ok-soft); color: var(--ok); }
+.badge.relay { background: var(--warn-soft); color: var(--warn); }
+.empty { color: var(--muted); padding: 8px 0; }
+details summary { cursor: pointer; font-weight: 600; }
+details ol, details ul { padding-left: 20px; margin: 8px 0; }
+details li { margin: 4px 0; }
+pre.log { max-height: 240px; overflow: auto; background: var(--panel-2); border-radius: 8px; padding: 10px; font: 12px/1.45 Consolas, ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0 0; }
+.hidden { display: none !important; }
+a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">B</div>
+  <div><h1>BOKALBS VPN</h1><div class="ver" id="version"></div></div>
+  <div class="spacer"></div>
+  <span class="pill" id="pill">Disconnected</span>
+  <button class="small" id="quit" title="Disconnect and close BOKALBS VPN">Quit</button>
+</header>
+
+<main>
+  <!-- Connect form -->
+  <section class="card" id="connectCard">
+    <h2>Connect</h2>
+    <div class="tabs" role="tablist">
+      <button type="button" id="tabJoin" class="on">Join a network</button>
+      <button type="button" id="tabHost">Host a network</button>
+    </div>
+    <p class="hint" id="modeHint"></p>
+    <form id="form" autocomplete="off">
+      <label for="nickname">Your nickname</label>
+      <input type="text" id="nickname" maxlength="32" placeholder="e.g. Arthas">
+      <div id="joinFields">
+        <label for="server">Server address</label>
+        <input type="text" id="server" placeholder="e.g. 203.0.113.7:47820 (from your host)">
+      </div>
+      <label for="network">Network name</label>
+      <input type="text" id="network" maxlength="64" placeholder="e.g. friday-lan">
+      <label for="password">Network password</label>
+      <div class="row">
+        <input class="grow" type="password" id="password" placeholder="at least 6 characters">
+        <button type="button" id="showPw" class="small">Show</button>
+      </div>
+      <div class="check"><input type="checkbox" id="savePw"><span>Remember password on this PC</span></div>
+      <div id="hostFields" class="hidden">
+        <label for="port">UDP port</label>
+        <input type="number" id="port" min="1" max="65535" value="47820">
+        <div class="check"><input type="checkbox" id="upnp" checked><span>Forward the port on my router automatically (UPnP)</span></div>
+      </div>
+      <details style="margin-top:12px">
+        <summary>Advanced</summary>
+        <div class="check"><input type="checkbox" id="relayOnly"><span>Always relay through the server (no direct connections)</span></div>
+      </details>
+      <div class="row" style="margin-top:16px">
+        <button type="submit" class="primary grow" id="connectBtn">Connect</button>
+      </div>
+      <div class="msg bad" id="formError"></div>
+    </form>
+  </section>
+
+  <!-- Status -->
+  <section class="card hidden" id="statusCard">
+    <h2>My connection</h2>
+    <div class="peer-sub">Your address on the VPN</div>
+    <div class="big" id="myIp">—</div>
+    <div class="msg" id="stateMsg"></div>
+    <dl class="kv">
+      <dt>Network</dt><dd id="kvNetwork"></dd>
+      <dt>Server</dt><dd id="kvServer"></dd>
+      <dt>Server ping</dt><dd id="kvPing">—</dd>
+    </dl>
+    <div id="hostBox" class="hidden">
+      <div class="invite">
+        <div class="peer-sub">Friends join with</div>
+        <div><code id="inviteAddr">…</code></div>
+        <div class="peer-sub" style="margin-top:6px">Network <b id="inviteNet"></b> · plus the password you chose</div>
+        <div class="row" style="margin-top:10px"><button class="small" id="copyInvite">Copy invite</button><span class="peer-sub" id="lanHint"></span></div>
+      </div>
+      <div class="msg" id="pfMsg"></div>
+      <div class="msg warn hidden" id="pfWarn"></div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="danger grow" id="disconnectBtn">Disconnect</button>
+    </div>
+  </section>
+
+  <!-- Players -->
+  <section class="card">
+    <h2>Players <span class="count" id="peerCount"></span></h2>
+    <ul class="peers" id="peers"></ul>
+    <div class="empty" id="noPeers">Nobody else is online yet.</div>
+  </section>
+
+  <!-- Share -->
+  <section class="card">
+    <h2>Share a folder</h2>
+    <p class="hint" style="margin-top:0">Friends on the VPN can browse and download files from this folder (read-only). Nobody outside the VPN can see it.</p>
+    <label for="shareFolder">Folder</label>
+    <div class="row">
+      <input class="grow" type="text" id="shareFolder" placeholder="e.g. C:\Games\Warcraft III\Maps\Download">
+      <button type="button" id="browse" class="small">Browse…</button>
+    </div>
+    <div class="check"><input type="checkbox" id="shareOn"><span>Share this folder while connected</span></div>
+    <div class="msg" id="shareMsg"></div>
+  </section>
+
+  <!-- Gaming help -->
+  <section class="card">
+    <h2>Playing Warcraft III &amp; LAN games</h2>
+    <details open>
+      <summary>Quick start</summary>
+      <ol>
+        <li>Everyone connects to the same network here first.</li>
+        <li>Then start the game and open <b>Local Area Network</b> (LAN).</li>
+        <li>One player creates the game – the others will see it in their LAN list.</li>
+      </ol>
+    </details>
+    <details>
+      <summary>Game not showing up?</summary>
+      <ul>
+        <li>Restart the game <i>after</i> connecting the VPN.</li>
+        <li>Allow the game in Windows Firewall when asked (tick both Private and Public).</li>
+        <li>Disconnect other VPN programs (Hamachi, Radmin, ZeroTier) while playing.</li>
+        <li>Check the player list: if someone shows <b>via server</b> it still works, just with a little more delay.</li>
+        <li>Warcraft III 1.29+ also has a "Direct IP" option – type the host's VPN address.</li>
+      </ul>
+    </details>
+    <details>
+      <summary>Windows file sharing (\\address)</summary>
+      <p class="hint">Folders you share in Windows (right-click → Properties → Sharing) are reachable at <b>\\your VPN address</b>. Friends log in with a Windows account of your PC. Use "Map network drive" to make it look like a local drive.</p>
+    </details>
+  </section>
+
+  <section class="card wide">
+    <details id="logDetails">
+      <summary>Activity log</summary>
+      <pre class="log" id="log"></pre>
+    </details>
+  </section>
+</main>
+
+<script>
+"use strict";
+const token = location.hash.slice(1);
+const $ = (id) => document.getElementById(id);
+let mode = "join";
+let formLoaded = false;
+let lastState = null;
+let shareDirty = false;
+
+async function api(path, body) {
+  const opts = { headers: { "X-Token": token } };
+  if (body !== undefined) {
+    opts.method = "POST";
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function setMode(m) {
+  mode = m;
+  $("tabJoin").classList.toggle("on", m === "join");
+  $("tabHost").classList.toggle("on", m === "host");
+  $("joinFields").classList.toggle("hidden", m !== "join");
+  $("hostFields").classList.toggle("hidden", m !== "host");
+  $("modeHint").textContent = m === "join"
+    ? "Enter the details your host gave you."
+    : "Your PC becomes the meeting point. Pick a network name and password and share them with friends.";
+  $("connectBtn").textContent = m === "join" ? "Join network" : "Start hosting";
+}
+$("tabJoin").onclick = () => setMode("join");
+$("tabHost").onclick = () => setMode("host");
+$("showPw").onclick = () => {
+  const p = $("password");
+  p.type = p.type === "password" ? "text" : "password";
+  $("showPw").textContent = p.type === "password" ? "Show" : "Hide";
+};
+
+function loadForm(s) {
+  $("nickname").value = s.nickname || "";
+  $("server").value = s.serverAddress || "";
+  $("network").value = s.networkName || "";
+  $("password").value = s.password || "";
+  $("savePw").checked = !!s.savePassword;
+  $("port").value = s.hostPort || 47820;
+  $("upnp").checked = s.upnp !== false;
+  $("relayOnly").checked = !!s.relayOnly;
+  $("shareFolder").value = s.shareFolder || "";
+  $("shareOn").checked = !!s.shareEnabled;
+  setMode(s.host ? "host" : "join");
+}
+
+$("form").onsubmit = async (e) => {
+  e.preventDefault();
+  $("formError").textContent = "";
+  $("connectBtn").disabled = true;
+  try {
+    await api("/api/connect", {
+      nickname: $("nickname").value,
+      serverAddress: $("server").value,
+      networkName: $("network").value,
+      password: $("password").value,
+      savePassword: $("savePw").checked,
+      host: mode === "host",
+      hostPort: parseInt($("port").value, 10) || 47820,
+      upnp: $("upnp").checked,
+      relayOnly: $("relayOnly").checked,
+    });
+    refresh();
+  } catch (err) {
+    $("formError").textContent = err.message;
+  } finally {
+    $("connectBtn").disabled = false;
+  }
+};
+
+$("disconnectBtn").onclick = async () => { await api("/api/disconnect", {}); refresh(); };
+$("quit").onclick = async () => {
+  if (lastState && lastState.running && !confirm("Disconnect and close BOKALBS VPN?")) return;
+  await api("/api/quit", {});
+  document.body.innerHTML = "<p style='padding:24px'>BOKALBS VPN has been closed. You can close this window.</p>";
+};
+
+async function saveShare() {
+  shareDirty = false;
+  try {
+    await api("/api/share", { enabled: $("shareOn").checked, folder: $("shareFolder").value });
+    setMsg($("shareMsg"), "", "");
+  } catch (err) {
+    $("shareOn").checked = false;
+    setMsg($("shareMsg"), "bad", err.message);
+  }
+  refresh();
+}
+$("shareOn").onchange = saveShare;
+$("shareFolder").oninput = () => { shareDirty = true; };
+$("shareFolder").onchange = () => { if ($("shareOn").checked) saveShare(); };
+$("browse").onclick = async () => {
+  try {
+    const r = await api("/api/pickfolder", {});
+    if (r.folder) { $("shareFolder").value = r.folder; if ($("shareOn").checked) saveShare(); }
+  } catch (err) { setMsg($("shareMsg"), "bad", err.message); }
+};
+
+$("copyInvite").onclick = () => {
+  const s = lastState;
+  if (!s || !s.hosting) return;
+  const text = "Join my BOKALBS VPN network!\nServer: " + (s.hosting.publicAddress || "(ask me)") +
+    "\nDownload: https://github.com/codered141218/BOKALBS-VPN/releases" +
+    "\nNetwork: " + s.settings.networkName + "\nPassword: (ask me)";
+  navigator.clipboard.writeText(text).then(() => {
+    $("copyInvite").textContent = "Copied!";
+    setTimeout(() => { $("copyInvite").textContent = "Copy invite"; }, 1500);
+  });
+};
+
+function setMsg(el, kind, text) {
+  el.className = "msg" + (kind ? " " + kind : "");
+  el.textContent = text || "";
+}
+
+const colors = ["#3b5bfd", "#9b5cff", "#e8590c", "#0ca678", "#d6336c", "#1098ad", "#f08c00", "#5c7cfa"];
+function colorFor(name) {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return colors[h % colors.length];
+}
+
+function renderPeers(st) {
+  const list = $("peers");
+  const peers = (st.running && st.client && st.client.peers) || [];
+  $("noPeers").classList.toggle("hidden", peers.length > 0);
+  $("noPeers").textContent = st.running ? "Nobody else is online yet." : "Connect to see who is online.";
+  $("peerCount").textContent = peers.length ? "(" + peers.length + ")" : "";
+  list.replaceChildren(...peers.map((p) => {
+    const li = document.createElement("li");
+    const av = document.createElement("div");
+    av.className = "avatar";
+    av.style.background = colorFor(p.name);
+    av.textContent = (p.name[0] || "?").toUpperCase();
+    const main = document.createElement("div");
+    main.className = "peer-main";
+    const name = document.createElement("div");
+    name.className = "peer-name";
+    name.textContent = p.name + " ";
+    const badge = document.createElement("span");
+    badge.className = "badge " + (p.direct ? "direct" : "relay");
+    badge.textContent = p.direct ? "direct" + (p.rttMs ? " · " + Math.round(p.rttMs) + " ms" : "") : "via server";
+    name.appendChild(badge);
+    const sub = document.createElement("div");
+    sub.className = "peer-sub";
+    sub.textContent = p.ip;
+    main.append(name, sub);
+    const files = document.createElement("button");
+    files.className = "small";
+    files.textContent = "Files";
+    files.title = "Open " + p.name + "'s shared folder";
+    files.onclick = () => api("/api/open", { ip: p.ip, kind: "web" }).catch((e) => alert(e.message));
+    const smb = document.createElement("button");
+    smb.className = "small";
+    smb.textContent = "\\\\" + p.ip;
+    smb.title = "Open Windows file sharing on " + p.name + "'s PC";
+    smb.onclick = () => api("/api/open", { ip: p.ip, kind: "smb" }).catch((e) => alert(e.message));
+    li.append(av, main, files, smb);
+    return li;
+  }));
+}
+
+function render(st) {
+  lastState = st;
+  $("version").textContent = "v" + st.version;
+  if (!formLoaded) { loadForm(st.settings); formLoaded = true; }
+  const c = st.client;
+  const pill = $("pill");
+  let pillText = "Disconnected", pillKind = "";
+  if (st.running && c) {
+    if (c.state === "connected") { pillText = "Connected"; pillKind = "ok"; }
+    else if (c.state === "reconnecting") { pillText = "Reconnecting"; pillKind = "warn"; }
+    else { pillText = "Connecting"; pillKind = "warn"; }
+  } else if (c && c.state === "failed") { pillText = "Failed"; pillKind = "bad"; }
+  pill.textContent = pillText;
+  pill.className = "pill " + pillKind;
+
+  $("connectCard").classList.toggle("hidden", st.running);
+  $("statusCard").classList.toggle("hidden", !st.running);
+  if (!st.running && c && c.state === "failed" && !$("formError").textContent) {
+    $("formError").textContent = c.message;
+  }
+  if (st.running && c) {
+    $("formError").textContent = "";
+    $("myIp").textContent = c.ip || "—";
+    setMsg($("stateMsg"), c.state === "connected" ? "ok" : "warn", c.message);
+    $("kvNetwork").textContent = st.settings.networkName;
+    $("kvServer").textContent = st.settings.host ? "This PC (hosting)" : st.settings.serverAddress;
+    $("kvPing").textContent = c.serverRttMs ? Math.round(c.serverRttMs) + " ms" : "—";
+  }
+  const h = st.hosting;
+  $("hostBox").classList.toggle("hidden", !h);
+  if (h) {
+    $("inviteAddr").textContent = h.publicAddress ||
+      (h.checked ? "<your internet IP>:" + h.port + "  (search “what is my IP”)" : "finding your internet address…");
+    $("inviteNet").textContent = st.settings.networkName;
+    $("lanHint").textContent = h.lanAddress ? "Same house? Use " + h.lanAddress : "";
+    setMsg($("pfMsg"), h.portForwardOk ? "ok" : "warn", h.portForward);
+    $("pfWarn").classList.toggle("hidden", !h.warning);
+    $("pfWarn").textContent = h.warning || "";
+  }
+  renderPeers(st);
+
+  const sh = st.share;
+  if (!shareDirty && document.activeElement !== $("shareFolder")) {
+    $("shareFolder").value = st.settings.shareFolder || "";
+    $("shareOn").checked = !!st.settings.shareEnabled;
+  }
+  if (sh.error) setMsg($("shareMsg"), "bad", sh.error);
+  else if (sh.active) setMsg($("shareMsg"), "ok", "Shared at " + sh.url + " – friends click “Files” next to your name.");
+  else if (st.settings.shareEnabled) setMsg($("shareMsg"), "", st.running ? "Starting…" : "Will be shared when you connect.");
+  else setMsg($("shareMsg"), "", "");
+
+  const log = $("log");
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = st.logs.join("\n");
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+async function refresh() {
+  try { render(await api("/api/state")); } catch (e) { /* app closing */ }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+/dist/
+/wintun/
+wintun-*.zip
+*.exe
+!installer/*.exe

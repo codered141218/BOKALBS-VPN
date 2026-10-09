@@ -1,0 +1,132 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # to publish releases for version tags
+
+env:
+  WINTUN_VERSION: "0.14.1"
+  WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: GOOS=windows go vet ./...
+      - run: go test -race -count=1 ./...
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Work out the version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Embed icon, version and administrator manifest
+        shell: bash
+        run: |
+          go install github.com/tc-hib/go-winres@v0.3.3
+          cd cmd/bokalbs-vpn
+          go-winres make --arch amd64 --product-version "$VERSION" --file-version "$VERSION"
+
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p dist
+          LDFLAGS="-s -w -X main.version=$VERSION"
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS -H windowsgui" -o dist/bokalbs-vpn.exe ./cmd/bokalbs-vpn
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o dist/bokalbs-vpn-cli.exe ./cmd/bokalbs-vpn-cli
+
+      - name: Download Wintun driver
+        shell: pwsh
+        run: |
+          $zip = "wintun-$env:WINTUN_VERSION.zip"
+          Invoke-WebRequest "https://www.wintun.net/builds/$zip" -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne $env:WINTUN_SHA256) { throw "Wintun checksum mismatch: got $hash" }
+          Expand-Archive $zip -DestinationPath wintun
+          Copy-Item wintun\wintun\bin\amd64\wintun.dll dist\
+          Copy-Item wintun\wintun\LICENSE.txt dist\WINTUN-LICENSE.txt
+
+      - name: Readme
+        shell: pwsh
+        run: Copy-Item docs\README-windows.txt dist\README.txt
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y | Out-Null }
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /DAppVersion=$env:VERSION /DSourceDir=..\dist installer\bokalbs-vpn.iss
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\bokalbs-vpn.exe, dist\bokalbs-vpn-cli.exe, dist\wintun.dll, dist\README.txt, dist\WINTUN-LICENSE.txt `
+            -DestinationPath "dist\BOKALBS-VPN-portable-$env:VERSION.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BOKALBS-VPN-windows-${{ env.VERSION }}
+          path: |
+            dist/BOKALBS-VPN-Setup-*.exe
+            dist/BOKALBS-VPN-portable-*.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/BOKALBS-VPN-Setup-*.exe
+            dist/BOKALBS-VPN-portable-*.zip
+
+  linux-server:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build server/CLI for Linux (VPS, Raspberry Pi)
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}; [[ "$GITHUB_REF" == refs/tags/v* ]] || VERSION=0.0.${GITHUB_RUN_NUMBER}
+          mkdir -p dist
+          for arch in amd64 arm64 arm; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+              -o dist/bokalbs-vpn-cli-linux-$arch ./cmd/bokalbs-vpn-cli
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BOKALBS-VPN-linux-cli
+          path: dist/*
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
