@@ -143,6 +143,10 @@ func (a *App) Connect(s config.Settings) error {
 		a.Logf("cannot save settings: %v", err)
 	}
 
+	if err := tunnel.AllowProgram(); err != nil {
+		a.Logf("cannot add firewall rule for the program: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	serverAddr := s.ServerAddress
 	var srv *server.Server

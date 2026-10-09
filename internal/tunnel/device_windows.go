@@ -107,3 +107,17 @@ func runHidden(args ...string) error {
 	}
 	return nil
 }
+
+const programRule = "BOKALBS-VPN-program"
+
+// AllowProgram lets this program receive connections from the internet
+// (friends reaching a network hosted here, and direct peer connections).
+func AllowProgram() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	_ = runHidden("netsh", "advfirewall", "firewall", "delete", "rule", "name="+programRule, "program="+exe)
+	return runHidden("netsh", "advfirewall", "firewall", "add", "rule", "name="+programRule,
+		"dir=in", "action=allow", "profile=any", "enable=yes", "program="+exe)
+}

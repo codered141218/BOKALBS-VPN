@@ -51,11 +51,15 @@ Name: "{group}\Uninstall BOKALBS VPN"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\BOKALBS VPN"; Filename: "{app}\bokalbs-vpn.exe"; Tasks: desktopicon
 
 [Run]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=BOKALBS-VPN-program"; Flags: runhidden
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=BOKALBS-VPN-program dir=in action=allow profile=any enable=yes program=""{app}\bokalbs-vpn.exe"""; Flags: runhidden
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=BOKALBS-VPN-program dir=in action=allow profile=any enable=yes program=""{app}\bokalbs-vpn-cli.exe"""; Flags: runhidden
 Filename: "{app}\bokalbs-vpn.exe"; Description: "{cm:LaunchProgram,BOKALBS VPN}"; Flags: nowait postinstall skipifsilent shellexec
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM bokalbs-vpn.exe"; Flags: runhidden; RunOnceId: "StopApp"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=BOKALBS-VPN-members"; Flags: runhidden; RunOnceId: "RemoveFirewallRule"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=BOKALBS-VPN-program"; Flags: runhidden; RunOnceId: "RemoveProgramRule"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\BOKALBS-VPN\WebView2"
