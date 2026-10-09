@@ -61,3 +61,18 @@ func TestDiscoverWithLocalServer(t *testing.T) {
 		t.Fatalf("got %+v want %s", res, sock.LocalAddr())
 	}
 }
+
+func TestPredictPorts(t *testing.T) {
+	ap := func(port uint16) netip.AddrPort { return netip.AddrPortFrom(netip.MustParseAddr("198.51.100.9"), port) }
+	seq := Result{Seen: []netip.AddrPort{ap(40000), ap(40001)}, Symmetric: true}.PredictPorts(10)
+	if seq[0] != 40002 || seq[2] != 40003 {
+		t.Fatalf("sequential: %v", seq)
+	}
+	step := Result{Seen: []netip.AddrPort{ap(40000), ap(40004)}, Symmetric: true}.PredictPorts(10)
+	if step[0] != 40008 || step[1] != 40005 {
+		t.Fatalf("step 4: %v", step)
+	}
+	if len(Result{Seen: []netip.AddrPort{ap(65534), ap(65535)}}.PredictPorts(10)) == 0 {
+		t.Fatal("no prediction near the top of the port range")
+	}
+}

@@ -319,6 +319,9 @@ func (c *Client) loop(ctx context.Context) error {
 			}
 			c.setState(state, err.Error()+" Retrying…")
 			wait := time.Duration(min(attempt+1, 5)) * 2 * time.Second
+			if c.cfg.Server == "" && attempt >= 3 {
+				wait = 30 * time.Second // go easy on the free rendezvous service
+			}
 			select {
 			case <-ctx.Done():
 				return nil
@@ -352,6 +355,9 @@ func (c *Client) connect(ctx context.Context) error {
 	var cands []netip.AddrPort
 	var rv *rendezvous.Client
 	var knock rendezvous.Message
+	var stunErr error
+	var symmetric bool
+	var knockErr atomic.Pointer[error]
 	if c.cfg.Server != "" {
 		c.setState(c.currentState(), "Looking up "+c.cfg.Server+"…")
 		server, err := resolve(c.cfg.Server)
@@ -377,15 +383,24 @@ func (c *Client) connect(ctx context.Context) error {
 		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		me, err := c.prober.Discover(dctx, c.sendTo, c.cfg.STUNServers)
 		cancel()
+		knock = rendezvous.Message{Role: rendezvous.RoleKnock}
 		if err == nil {
 			eps = append([]string{me.Public.String()}, eps...)
 			c.mu.Lock()
 			c.public = me.Public.String()
 			c.mu.Unlock()
+			if me.Symmetric {
+				// Our router picks a new port for every destination; tell the
+				// host which ports it will most likely use for us next.
+				knock.Ports = me.PredictPorts(96)
+				c.cfg.Logf("client: this router changes ports per connection (symmetric NAT, seen %v)", me.Seen)
+			}
 		} else {
 			c.cfg.Logf("client: cannot determine public address: %v", err)
+			stunErr = err
 		}
-		knock = rendezvous.Message{Role: rendezvous.RoleKnock, Endpoints: eps}
+		knock.Endpoints = eps
+		symmetric = err == nil && me.Symmetric
 	}
 
 	// 2. Handshake.
@@ -415,11 +430,13 @@ func (c *Client) connect(ctx context.Context) error {
 	var res handshakeResult
 	got := false
 	for i := 0; i < attempts && !got; i++ {
-		if rv != nil && i%4 == 0 {
-			// Ask the host to punch towards us; repeated in case it missed it.
+		if rv != nil && i%8 == 0 {
+			// Ask the host to punch towards us; repeated once in case it
+			// missed it. (The free rendezvous service limits messages.)
 			go func() {
 				if err := rv.Publish(ctx, knock); err != nil && ctx.Err() == nil {
 					c.cfg.Logf("client: knock: %v", err)
+					knockErr.Store(&err)
 				}
 			}()
 		}
@@ -438,7 +455,15 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 	if !got {
 		if rv != nil {
-			return errors.New("found the host but could not get through. One of the routers blocks direct connections; if this keeps happening, let another friend host or use a VPS server.")
+			switch {
+			case knockErr.Load() != nil:
+				return fmt.Errorf("found the host but could not ask it to let you in: %v. Check that this PC can reach ntfy.sh (try again in a few minutes).", *knockErr.Load())
+			case symmetric:
+				return errors.New("found the host but could not get through: your internet connection changes ports for every connection (symmetric NAT, common with mobile data, phone hotspots and some providers). Try another connection such as home Wi-Fi, or ask the host to forward UDP port 47820 and type the host's address.")
+			case stunErr != nil:
+				return fmt.Errorf("found the host but could not get through: this PC could not find its public address (%v). A firewall or the network may block UDP; try another connection.", stunErr)
+			}
+			return errors.New("found the host but could not get through. A router or firewall blocks direct connections; if this keeps happening, try another internet connection, or let another friend host.")
 		}
 		return fmt.Errorf("no answer from server %s. Check the server address, that the network name and password are exactly right, and that the host is online. You can also leave the server address empty to find the host automatically.", cands[0])
 	}

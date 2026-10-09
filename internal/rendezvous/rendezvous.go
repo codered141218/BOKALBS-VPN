@@ -52,6 +52,10 @@ type Message struct {
 	Endpoints []string `json:"e"` // UDP addresses, best first
 	Time      int64    `json:"t"` // unix seconds
 	Nonce     string   `json:"n,omitempty"`
+	// Ports are likely public ports of a player behind a router that
+	// changes ports per connection (symmetric NAT), at the address of the
+	// first endpoint. The host punches towards all of them.
+	Ports []uint16 `json:"p,omitempty"`
 }
 
 // Client talks to the rendezvous service for one network.

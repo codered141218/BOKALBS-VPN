@@ -579,7 +579,17 @@ func (s *Server) rendezvousLoop(ctx context.Context) {
 			return
 		}
 		eps := netutil.ParseEndpoints(m.Endpoints, 8)
-		s.cfg.Logf("server: a player is knocking from %v; opening the way", eps)
+		if len(m.Ports) > 0 && len(eps) > 0 {
+			s.cfg.Logf("server: a player is knocking from %v (router changes ports; trying %d likely ports)", eps, len(m.Ports))
+			for i, p := range m.Ports {
+				if i == 128 {
+					break
+				}
+				eps = append(eps, netip.AddrPortFrom(eps[0].Addr(), p))
+			}
+		} else {
+			s.cfg.Logf("server: a player is knocking from %v; opening the way", eps)
+		}
 		go s.punch(ctx, eps)
 		// A player is looking for us: make sure our announcement is fresh.
 		select {
@@ -630,7 +640,9 @@ func (s *Server) rendezvousLoop(ctx context.Context) {
 			return
 		case <-check.C:
 		case <-s.announce:
-			forced = true
+			// Refresh the announcement for a knocking player, but not on every
+			// knock: the free rendezvous service limits how many messages we post.
+			forced = time.Since(lastAnnounce) > 2*time.Minute
 		}
 	}
 }

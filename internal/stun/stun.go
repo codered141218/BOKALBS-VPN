@@ -171,6 +171,42 @@ type Result struct {
 	// Symmetric is true when the router uses a different public port for
 	// every destination; hole punching then usually fails.
 	Symmetric bool
+	Seen      []netip.AddrPort // every answer, in order
+}
+
+// PredictPorts guesses which public ports a symmetric router will use for
+// the next connections. Many such routers hand out ports in sequence (or
+// in fixed steps), so the next ports follow the last ones seen. It returns
+// up to n ports, most likely first.
+func (r Result) PredictPorts(n int) []uint16 {
+	if len(r.Seen) == 0 {
+		return nil
+	}
+	last := int(r.Seen[len(r.Seen)-1].Port())
+	step := 1
+	if len(r.Seen) >= 2 {
+		if d := last - int(r.Seen[len(r.Seen)-2].Port()); d != 0 && d > -512 && d < 512 {
+			step = d
+		}
+	}
+	var out []uint16
+	seen := map[int]bool{}
+	add := func(p int) {
+		if p >= 1024 && p <= 65535 && !seen[p] && len(out) < n {
+			seen[p] = true
+			out = append(out, uint16(p))
+		}
+	}
+	for k := 1; len(out) < n && k <= n; k++ {
+		add(last + step*k)
+		if step != 1 {
+			add(last + k)
+		}
+		if step > 0 {
+			add(last - k) // some routers count down or reuse recent ports
+		}
+	}
+	return out
 }
 
 // Discover asks up to two servers for the socket's public address.
@@ -201,9 +237,11 @@ func (pr *Prober) Discover(ctx context.Context, send SendFunc, servers []string)
 		}
 		return Result{}, lastErr
 	}
-	res := Result{Public: seen[0]}
+	res := Result{Public: seen[0], Seen: seen}
 	if len(seen) == 2 && seen[0] != seen[1] {
 		res.Symmetric = true
+		// The next connection most likely follows the latest mapping.
+		res.Public = seen[1]
 	}
 	return res, nil
 }
