@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codered141218/bokalbs-vpn/internal/netutil"
@@ -90,6 +91,11 @@ type Status struct {
 	Public      string       `json:"public,omitempty"`
 	ServerRTTms float64      `json:"serverRttMs,omitempty"`
 	Peers       []PeerStatus `json:"peers"`
+
+	// LAN game broadcasts this PC sent into the VPN and received from it,
+	// to see whether games such as Warcraft III can find each other.
+	BroadcastsSent     uint64 `json:"broadcastsSent"`
+	BroadcastsReceived uint64 `json:"broadcastsReceived"`
 }
 
 type peer struct {
@@ -123,6 +129,9 @@ type handshakeResult struct {
 
 // Client is a running network member.
 type Client struct {
+	bcastOut atomic.Uint64
+	bcastIn  atomic.Uint64
+
 	cfg    Config
 	psk    []byte
 	conn   *net.UDPConn
@@ -211,7 +220,8 @@ func (c *Client) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	st := Status{State: c.state, Message: c.message, Public: c.public, Peers: []PeerStatus{}}
+	st := Status{State: c.state, Message: c.message, Public: c.public, Peers: []PeerStatus{},
+		BroadcastsSent: c.bcastOut.Load(), BroadcastsReceived: c.bcastIn.Load()}
 	if c.addr.IsValid() {
 		st.IP = c.addr.Addr().String()
 		st.Subnet = c.addr.Masked().String()
@@ -645,8 +655,12 @@ func (c *Client) sendIP(pkt []byte) {
 	}
 	c.mu.Unlock()
 	if data == nil {
-		if sealer == nil || !(subnet.Contains(dst) || proto.IsBroadcastLike(dst, subnet)) {
+		bcast := proto.IsBroadcastLike(dst, subnet)
+		if sealer == nil || !(subnet.Contains(dst) || bcast) {
 			return
+		}
+		if bcast && !proto.IsSystemChatter(pkt) {
+			c.bcastOut.Add(1)
 		}
 		to, data = server, sealer.Seal(proto.KindIP, pkt)
 	}
@@ -869,8 +883,13 @@ func (c *Client) deliver(pkt []byte, wantSrc netip.Addr) {
 	if dev == nil || !addr.Contains(src) || (wantSrc.IsValid() && src != wantSrc) {
 		return
 	}
-	if dst != addr.Addr() && !proto.IsBroadcastLike(dst, addr.Masked()) {
-		return
+	if dst != addr.Addr() {
+		if !proto.IsBroadcastLike(dst, addr.Masked()) {
+			return
+		}
+		if !proto.IsSystemChatter(pkt) {
+			c.bcastIn.Add(1)
+		}
 	}
 	_ = dev.WritePacket(pkt)
 }

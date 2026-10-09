@@ -44,3 +44,24 @@ func LastAddr(p netip.Prefix) netip.Addr {
 	binary.BigEndian.PutUint32(out[:], v)
 	return netip.AddrFrom4(out)
 }
+
+// IsSystemChatter reports whether p is background broadcast traffic Windows
+// sends by itself (name lookups, network discovery, IGMP), as opposed to
+// broadcasts from applications such as LAN games.
+func IsSystemChatter(p []byte) bool {
+	if len(p) < 20 || p[0]>>4 != 4 {
+		return false
+	}
+	ihl := int(p[0]&0x0f) * 4
+	if p[9] != 17 { // not UDP: IGMP and friends
+		return true
+	}
+	if len(p) < ihl+4 {
+		return true
+	}
+	switch binary.BigEndian.Uint16(p[ihl+2 : ihl+4]) {
+	case 67, 68, 137, 138, 1900, 3702, 5353, 5355:
+		return true
+	}
+	return false
+}

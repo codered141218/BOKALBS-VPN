@@ -144,6 +144,7 @@ a { color: var(--accent); }
       <dt>Network</dt><dd id="kvNetwork"></dd>
       <dt>Server</dt><dd id="kvServer"></dd>
       <dt>Server ping</dt><dd id="kvPing">—</dd>
+      <dt title="LAN games such as Warcraft III find each other with broadcasts">LAN game broadcasts</dt><dd id="kvBcast">—</dd>
     </dl>
     <div id="hostBox" class="hidden">
       <div class="invite">
@@ -195,6 +196,7 @@ a { color: var(--accent); }
       <summary>Game not showing up?</summary>
       <ul>
         <li>Restart the game <i>after</i> connecting the VPN.</li>
+        <li>Watch <b>LAN game broadcasts</b> under My connection while you're on the game's LAN screen. Both numbers should go up on both PCs. If <b>sent</b> stays the same, Windows is sending the game's broadcasts to another network adapter: disable other VPN adapters (Hamachi, Radmin VPN, ZeroTier) in Network Connections and restart the game.</li>
         <li>Allow the game in Windows Firewall when asked (tick both Private and Public).</li>
         <li>Disconnect other VPN programs (Hamachi, Radmin, ZeroTier) while playing.</li>
         <li>Check the player list: if someone shows <b>via server</b> it still works, just with a little more delay.</li>
@@ -416,6 +418,7 @@ function render(st) {
     $("kvNetwork").textContent = st.settings.networkName;
     $("kvServer").textContent = st.settings.host ? "This PC (hosting)" : (st.settings.serverAddress || "Found automatically");
     $("kvPing").textContent = c.serverRttMs ? Math.round(c.serverRttMs) + " ms" : "—";
+    $("kvBcast").textContent = "sent " + (c.broadcastsSent || 0) + " · received " + (c.broadcastsReceived || 0);
   }
   const h = st.hosting;
   $("hostBox").classList.toggle("hidden", !h);

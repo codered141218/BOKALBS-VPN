@@ -195,6 +195,14 @@ func testNetwork(t *testing.T, relayOnly bool) {
 	b.toNet <- udpPacket(b.addr.Addr(), proto.LastAddr(b.addr), 6112, "subnet broadcast")
 	expectPacket(t, a, "subnet broadcast")
 	expectPacket(t, c, "subnet broadcast")
+	b.toNet <- udpPacket(b.addr.Addr(), proto.LastAddr(b.addr), 137, "netbios chatter")
+	expectPacket(t, a, "netbios chatter")
+	if st := ms[1].c.Status(); st.BroadcastsSent != 1 {
+		t.Fatalf("game broadcasts sent by bob = %d, want 1", st.BroadcastsSent)
+	}
+	if st := ms[0].c.Status(); st.BroadcastsReceived != 2 {
+		t.Fatalf("game broadcasts received by alice = %d, want 2", st.BroadcastsReceived)
+	}
 
 	// Spoofed source addresses are dropped.
 	a.toNet <- udpPacket(c.addr.Addr(), b.addr.Addr(), 1, "spoofed")

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codered141218/bokalbs-vpn/internal/proto"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -70,12 +71,27 @@ func configure(addr netip.Prefix) error {
 		}
 	}
 	// Allow other members to reach this PC (file sharing, game hosting, ping),
-	// but only on the VPN address and only from VPN addresses.
+	// but only from VPN addresses. Besides our own address this must include
+	// the broadcast and multicast addresses: LAN games such as Warcraft III
+	// announce and search for games by broadcasting to 255.255.255.255.
+	localIPs := strings.Join([]string{
+		addr.Addr().String(),
+		proto.LastAddr(addr).String(),
+		"255.255.255.255",
+		"224.0.0.0-239.255.255.255",
+	}, ",")
 	_ = runHidden("netsh", "advfirewall", "firewall", "delete", "rule", "name="+firewallRule)
-	if err := runHidden("netsh", "advfirewall", "firewall", "add", "rule", "name="+firewallRule,
-		"dir=in", "action=allow", "profile=any", "enable=yes",
-		"localip="+addr.Addr().String(), "remoteip="+addr.Masked().String()); err != nil {
-		return fmt.Errorf("cannot add firewall rule: %w", err)
+	add := func(local string) error {
+		return runHidden("netsh", "advfirewall", "firewall", "add", "rule", "name="+firewallRule,
+			"dir=in", "action=allow", "profile=any", "enable=yes",
+			"localip="+local, "remoteip="+addr.Masked().String())
+	}
+	if err := add(localIPs); err != nil {
+		// Older Windows versions may reject part of the list; any local
+		// address is still limited to traffic from VPN members.
+		if err := add("any"); err != nil {
+			return fmt.Errorf("cannot add firewall rule: %w", err)
+		}
 	}
 	return nil
 }
