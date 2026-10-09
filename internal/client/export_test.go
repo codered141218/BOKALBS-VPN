@@ -1,5 +1,9 @@
 package client
 
-import "net/netip"
+import (
+	"net/netip"
 
-func LocalEndpointsForTest() []string { return localEndpoints(1, netip.Prefix{}) }
+	"github.com/codered141218/bokalbs-vpn/internal/netutil"
+)
+
+func LocalEndpointsForTest() []string { return netutil.LocalEndpoints(1, netip.Prefix{}) }

@@ -8,12 +8,12 @@ One friend HOSTS the network, everyone else JOINS it.
 The host:
   1. Open BOKALBS VPN, choose "Host a network".
   2. Type a nickname, a network name and a password, click "Start hosting".
-  3. Send friends the address shown under "Friends join with",
-     plus the network name and password.
+  3. Send friends the network name and password ("Copy invite").
+     No port forwarding is needed.
 
 Everyone else:
   1. Open BOKALBS VPN, choose "Join a network".
-  2. Enter the host's address, the network name and the password.
+  2. Leave "Server address" empty; enter the network name and password.
   3. Click "Join network". Your VPN address appears (e.g. 10.77.0.3).
 
 WARCRAFT III AND OTHER LAN GAMES
@@ -32,11 +32,11 @@ SHARING FILES
 
 IF FRIENDS CANNOT CONNECT TO THE HOST
 -------------------------------------
-  - The host's router must let UDP port 47820 in. The app tries to do this
-    automatically (UPnP). If that fails, add a port forwarding rule in the
-    router: UDP 47820 -> the host PC.
-  - Some internet providers (CGNAT) make hosting at home impossible. Then let
-    another friend host, or run the server on a small VPS:
+  - Check that the network name and password match exactly.
+  - Friends connect through the routers automatically (hole punching). If the
+    host's app warns about "symmetric NAT / CGNAT", that internet connection
+    does not allow it. Then let another friend host, forward UDP port 47820
+    to the host PC in the router, or run the server on a small VPS:
         bokalbs-vpn-cli server -network NAME -password PASS
 
 Settings and logs: %APPDATA%\BOKALBS-VPN

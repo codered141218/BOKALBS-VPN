@@ -16,7 +16,9 @@ import (
 
 	"github.com/codered141218/bokalbs-vpn/internal/client"
 	"github.com/codered141218/bokalbs-vpn/internal/config"
+	"github.com/codered141218/bokalbs-vpn/internal/rendezvous"
 	"github.com/codered141218/bokalbs-vpn/internal/server"
+	"github.com/codered141218/bokalbs-vpn/internal/stun"
 )
 
 var version = "dev"
@@ -24,11 +26,13 @@ var version = "dev"
 const usage = `BOKALBS VPN %s
 
 Usage:
-  bokalbs-vpn-cli server -network NAME -password PASS [-listen :47820] [-subnet 10.77.0.0/24] [-leases FILE]
-      Run a network server. Needs no administrator rights. Open/forward UDP port 47820.
+  bokalbs-vpn-cli server -network NAME -password PASS [-listen :47820] [-subnet 10.77.0.0/24] [-leases FILE] [-no-port-forwarding]
+      Run a network server. Needs no administrator rights. Open/forward UDP port 47820,
+      or use -no-port-forwarding so players can find it by network name and punch through.
 
-  bokalbs-vpn-cli join -server HOST:PORT -network NAME -password PASS [-name NICK]
+  bokalbs-vpn-cli join [-server HOST:PORT] -network NAME -password PASS [-name NICK]
       Join a network from the command line (needs administrator/root rights).
+      Without -server the host is found automatically.
 
   bokalbs-vpn-cli version
 
@@ -74,13 +78,19 @@ func runServer(ctx context.Context, args []string) error {
 	pass := fs.String("password", "", "network password")
 	subnet := fs.String("subnet", server.DefaultSubnet, "virtual network (IPv4, /16 to /29)")
 	leases := fs.String("leases", "", "file to remember assigned addresses across restarts")
+	noPF := fs.Bool("no-port-forwarding", false, "let players find this server by network name (UDP hole punching)")
 	_ = fs.Parse(args)
+	rv := ""
+	if *noPF {
+		rv = rendezvous.URL()
+	}
 	prefix, err := netip.ParsePrefix(*subnet)
 	if err != nil {
 		return fmt.Errorf("invalid -subnet: %w", err)
 	}
 	srv, err := server.New(server.Config{
 		Listen: *listen, Network: *network, Password: password(*pass), Subnet: prefix, LeaseFile: *leases, Logf: log.Printf,
+		Rendezvous: rv, STUNServers: stun.Servers(),
 	})
 	if err != nil {
 		return err
@@ -100,7 +110,7 @@ func runJoin(ctx context.Context, args []string) error {
 	name := fs.String("name", settings.Nickname, "nickname")
 	relay := fs.Bool("relay-only", false, "always relay through the server")
 	_ = fs.Parse(args)
-	if !strings.Contains(*addr, ":") {
+	if *addr != "" && !strings.Contains(*addr, ":") {
 		*addr = fmt.Sprintf("%s:%d", *addr, server.DefaultPort)
 	}
 	if err := config.Save(settings); err != nil {
@@ -109,6 +119,7 @@ func runJoin(ctx context.Context, args []string) error {
 	c, err := client.Start(ctx, client.Config{
 		Server: *addr, Network: *network, Password: password(*pass), Name: *name,
 		ClientID: settings.ClientID, RelayOnly: *relay, AppVersion: version, Logf: log.Printf,
+		Rendezvous: rendezvous.URL(), STUNServers: stun.Servers(),
 	})
 	if err != nil {
 		return err

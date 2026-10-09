@@ -107,8 +107,8 @@ a { color: var(--accent); }
       <label for="nickname">Your nickname</label>
       <input type="text" id="nickname" maxlength="32" placeholder="e.g. Arthas">
       <div id="joinFields">
-        <label for="server">Server address</label>
-        <input type="text" id="server" placeholder="e.g. 203.0.113.7:47820 (from your host)">
+        <label for="server">Server address <span style="font-weight:400">(optional)</span></label>
+        <input type="text" id="server" placeholder="Leave empty – the host is found automatically">
       </div>
       <label for="network">Network name</label>
       <input type="text" id="network" maxlength="64" placeholder="e.g. friday-lan">
@@ -148,8 +148,8 @@ a { color: var(--accent); }
     <div id="hostBox" class="hidden">
       <div class="invite">
         <div class="peer-sub">Friends join with</div>
-        <div><code id="inviteAddr">…</code></div>
-        <div class="peer-sub" style="margin-top:6px">Network <b id="inviteNet"></b> · plus the password you chose</div>
+        <div><code>Network <span id="inviteNet"></span></code></div>
+        <div class="peer-sub" style="margin-top:6px">plus the password you chose, and the <b>server address left empty</b><span id="inviteAddr"></span></div>
         <div class="row" style="margin-top:10px"><button class="small" id="copyInvite">Copy invite</button><span class="peer-sub" id="lanHint"></span></div>
       </div>
       <div class="msg" id="pfMsg"></div>
@@ -244,7 +244,7 @@ function setMode(m) {
   $("joinFields").classList.toggle("hidden", m !== "join");
   $("hostFields").classList.toggle("hidden", m !== "host");
   $("modeHint").textContent = m === "join"
-    ? "Enter the details your host gave you."
+    ? "Enter the network name and password your host gave you."
     : "Your PC becomes the meeting point. Pick a network name and password and share them with friends.";
   $("connectBtn").textContent = m === "join" ? "Join network" : "Start hosting";
 }
@@ -325,9 +325,12 @@ $("browse").onclick = async () => {
 $("copyInvite").onclick = () => {
   const s = lastState;
   if (!s || !s.hosting) return;
-  const text = "Join my BOKALBS VPN network!\nServer: " + (s.hosting.publicAddress || "(ask me)") +
-    "\nDownload: https://github.com/codered141218/BOKALBS-VPN/releases" +
-    "\nNetwork: " + s.settings.networkName + "\nPassword: (ask me)";
+  const h = s.hosting;
+  const text = "Join my BOKALBS VPN network!" +
+    "\nNetwork name: " + s.settings.networkName +
+    "\nPassword: (ask me)" +
+    "\nServer address: leave it empty" +
+    (h.portForwardOk && h.publicAddress ? " (or use " + h.publicAddress + ")" : "");
   navigator.clipboard.writeText(text).then(() => {
     $("copyInvite").textContent = "Copied!";
     setTimeout(() => { $("copyInvite").textContent = "Copy invite"; }, 1500);
@@ -411,17 +414,32 @@ function render(st) {
     $("myIp").textContent = c.ip || "—";
     setMsg($("stateMsg"), c.state === "connected" ? "ok" : "warn", c.message);
     $("kvNetwork").textContent = st.settings.networkName;
-    $("kvServer").textContent = st.settings.host ? "This PC (hosting)" : st.settings.serverAddress;
+    $("kvServer").textContent = st.settings.host ? "This PC (hosting)" : (st.settings.serverAddress || "Found automatically");
     $("kvPing").textContent = c.serverRttMs ? Math.round(c.serverRttMs) + " ms" : "—";
   }
   const h = st.hosting;
   $("hostBox").classList.toggle("hidden", !h);
   if (h) {
-    $("inviteAddr").textContent = h.publicAddress ||
-      (h.checked ? "<your internet IP>:" + h.port + "  (search “what is my IP”)" : "finding your internet address…");
+    $("inviteAddr").textContent = h.portForwardOk && h.publicAddress ? " (or " + h.publicAddress + ")" : "";
     $("inviteNet").textContent = st.settings.networkName;
     $("lanHint").textContent = h.lanAddress ? "Same house? Use " + h.lanAddress : "";
-    setMsg($("pfMsg"), h.portForwardOk ? "ok" : "warn", h.portForward);
+    const nat = h.nat || {};
+    let kind = "", text = "Checking your internet connection…";
+    if (h.portForwardOk) {
+      kind = "ok"; text = h.portForward;
+    } else if (nat.announced && !nat.symmetric) {
+      kind = "ok";
+      text = "Friends can join without port forwarding: they leave “Server address” empty and type the network name and password.";
+    } else if (nat.symmetric) {
+      kind = "warn";
+      text = "Your internet connection changes ports for every connection (symmetric NAT or CGNAT), so friends may not get through. " +
+        "If they can't connect, let a friend host instead, or run the server on a VPS.";
+    } else if (nat.checked && nat.error) {
+      kind = "warn";
+      text = "Could not set up joining without port forwarding (" + nat.error + "). " +
+        (h.checked ? h.portForward + " Friends need the port forwarded to reach you." : "");
+    }
+    setMsg($("pfMsg"), kind, text);
     $("pfWarn").classList.toggle("hidden", !h.warning);
     $("pfWarn").textContent = h.warning || "";
   }

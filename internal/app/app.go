@@ -21,8 +21,10 @@ import (
 	"github.com/codered141218/bokalbs-vpn/internal/client"
 	"github.com/codered141218/bokalbs-vpn/internal/config"
 	"github.com/codered141218/bokalbs-vpn/internal/portmap"
+	"github.com/codered141218/bokalbs-vpn/internal/rendezvous"
 	"github.com/codered141218/bokalbs-vpn/internal/server"
 	"github.com/codered141218/bokalbs-vpn/internal/share"
+	"github.com/codered141218/bokalbs-vpn/internal/stun"
 	"github.com/codered141218/bokalbs-vpn/internal/tunnel"
 )
 
@@ -36,6 +38,8 @@ type Hosting struct {
 	Warning       string          `json:"warning,omitempty"`
 	Checked       bool            `json:"checked"` // router and internet address checks are done
 	Members       []server.Member `json:"members"`
+	// NAT tells whether friends can join without port forwarding.
+	NAT server.NATStatus `json:"nat"`
 }
 
 // ShareState describes this PC's shared folder.
@@ -119,10 +123,8 @@ func (a *App) Connect(s config.Settings) error {
 		s.HostPort = server.DefaultPort
 	}
 	if !s.Host {
-		if s.ServerAddress == "" {
-			return errors.New("enter the server address your host gave you (for example 203.0.113.7:47820)")
-		}
-		if _, _, err := net.SplitHostPort(s.ServerAddress); err != nil {
+		// An empty server address means: find the host automatically.
+		if _, _, err := net.SplitHostPort(s.ServerAddress); s.ServerAddress != "" && err != nil {
 			s.ServerAddress = net.JoinHostPort(strings.Trim(s.ServerAddress, "[]"), strconv.Itoa(server.DefaultPort))
 		}
 	}
@@ -159,6 +161,9 @@ func (a *App) Connect(s config.Settings) error {
 			Password:  s.Password,
 			LeaseFile: filepath.Join(config.Dir(), "leases-"+safeName(s.NetworkName)+".json"),
 			Logf:      a.Logf,
+			// Lets friends join without port forwarding.
+			Rendezvous:  rendezvous.URL(),
+			STUNServers: stun.Servers(),
 		})
 		if err == nil {
 			err = srv.Listen()
@@ -182,6 +187,9 @@ func (a *App) Connect(s config.Settings) error {
 		RelayOnly:  s.RelayOnly,
 		OpenDevice: a.OpenDevice,
 		Logf:       a.Logf,
+		// Used when no server address was given.
+		Rendezvous:  rendezvous.URL(),
+		STUNServers: stun.Servers(),
 	})
 	if err != nil {
 		cancel()
@@ -194,6 +202,8 @@ func (a *App) Connect(s config.Settings) error {
 	if s.Host {
 		go a.setupHosting(ctx, gen, s)
 		a.Logf("hosting network %q on UDP port %d", s.NetworkName, s.HostPort)
+	} else if serverAddr == "" {
+		a.Logf("joining network %q (finding the host automatically)", s.NetworkName)
 	} else {
 		a.Logf("joining network %q at %s", s.NetworkName, serverAddr)
 	}
@@ -214,8 +224,7 @@ func (a *App) setupHosting(ctx context.Context, gen int, s config.Settings) {
 	if s.UPnP {
 		m, err := portmap.Map(ctx, uint16(s.HostPort), "BOKALBS VPN")
 		if err != nil {
-			status = "Automatic port forwarding failed: " + err.Error() +
-				fmt.Sprintf(". Forward UDP port %d to this PC in your router settings.", s.HostPort)
+			status = "Your router did not open UDP port " + strconv.Itoa(s.HostPort) + " automatically (" + err.Error() + ")."
 		} else {
 			ok = true
 			upnpIP = m.ExternalIP
@@ -435,6 +444,7 @@ func (a *App) State() State {
 	}
 	if st.Hosting != nil && srv != nil {
 		st.Hosting.Members = srv.Members()
+		st.Hosting.NAT = srv.NAT()
 	}
 	return st
 }

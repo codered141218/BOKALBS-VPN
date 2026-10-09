@@ -14,12 +14,17 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/codered141218/bokalbs-vpn/internal/netutil"
 	"github.com/codered141218/bokalbs-vpn/internal/proto"
+	"github.com/codered141218/bokalbs-vpn/internal/rendezvous"
+	"github.com/codered141218/bokalbs-vpn/internal/stun"
 	"github.com/codered141218/bokalbs-vpn/internal/tunnel"
 )
 
@@ -30,6 +35,7 @@ const (
 	punchInterval      = 2 * time.Second
 	directTimeout      = 15 * time.Second
 	handshakeAttempts  = 5
+	punchAttempts      = 16 // when connecting through the rendezvous service
 	handshakeRetryWait = time.Second
 )
 
@@ -43,6 +49,11 @@ type Config struct {
 	ListenPort int    // local UDP port, 0 = any
 	AppVersion string
 	RelayOnly  bool // never try direct peer-to-peer connections
+
+	// When Server is empty the host is found through this rendezvous
+	// service (see package rendezvous), so nobody needs port forwarding.
+	Rendezvous  string
+	STUNServers []string // defaults to stun.Servers()
 
 	// OpenDevice creates the virtual adapter once the address is known.
 	// Defaults to tunnel.Open.
@@ -100,12 +111,14 @@ func (p *peer) directAlive(now time.Time) bool {
 
 type handshake struct {
 	eph    *proto.Ephemeral
+	cands  []netip.AddrPort // addresses the server may answer from
 	result chan handshakeResult
 }
 
 type handshakeResult struct {
 	sid  uint32
 	keys *proto.SessionKeys
+	from netip.AddrPort
 }
 
 // Client is a running network member.
@@ -113,6 +126,7 @@ type Client struct {
 	cfg    Config
 	psk    []byte
 	conn   *net.UDPConn
+	prober stun.Prober
 	cancel context.CancelFunc
 	done   chan struct{}
 
@@ -141,8 +155,14 @@ type Client struct {
 // Start launches the client in the background. Use Status to follow it and
 // Stop to disconnect.
 func Start(parent context.Context, cfg Config) (*Client, error) {
-	if cfg.Server == "" || cfg.Network == "" || cfg.Password == "" {
-		return nil, errors.New("server address, network name and password are required")
+	if cfg.Network == "" || cfg.Password == "" {
+		return nil, errors.New("network name and password are required")
+	}
+	if cfg.Server == "" && cfg.Rendezvous == "" {
+		return nil, errors.New("a server address or a rendezvous service is required")
+	}
+	if len(cfg.STUNServers) == 0 {
+		cfg.STUNServers = stun.Servers()
 	}
 	if cfg.ClientID == "" {
 		return nil, errors.New("client id is required")
@@ -295,26 +315,66 @@ type fatalError struct{ err error }
 func (f *fatalError) Error() string { return f.err.Error() }
 
 func (c *Client) connect(ctx context.Context) error {
-	c.setState(c.currentState(), "Looking up "+c.cfg.Server+"…")
-	server, err := resolve(c.cfg.Server)
-	if err != nil {
-		return err
-	}
 	if c.psk == nil {
 		c.setState(c.currentState(), "Preparing encryption keys…")
 		c.psk = proto.DerivePSK(c.cfg.Network, c.cfg.Password)
 	}
 	c.mu.Lock()
-	c.server = server
+	exclude := c.addr
 	c.mu.Unlock()
+	port := c.conn.LocalAddr().(*net.UDPAddr).Port
 
-	// 1. Handshake.
-	c.setState(c.currentState(), "Contacting server "+server.String()+"…")
+	// 1. Work out where the server is.
+	var cands []netip.AddrPort
+	var rv *rendezvous.Client
+	var knock rendezvous.Message
+	if c.cfg.Server != "" {
+		c.setState(c.currentState(), "Looking up "+c.cfg.Server+"…")
+		server, err := resolve(c.cfg.Server)
+		if err != nil {
+			return err
+		}
+		cands = []netip.AddrPort{server}
+	} else {
+		c.setState(c.currentState(), "Looking for the host of network "+strconv.Quote(c.cfg.Network)+"…")
+		rv = rendezvous.New(c.cfg.Rendezvous, c.psk)
+		host, err := rv.Latest(ctx, rendezvous.RoleHost, 30*time.Minute)
+		if errors.Is(err, rendezvous.ErrNotFound) {
+			return fmt.Errorf("nobody is hosting network %q right now, or the network name or password is different. Ask the host to start hosting first.", c.cfg.Network)
+		}
+		if err != nil {
+			return err
+		}
+		cands = netutil.ParseEndpoints(host.Endpoints, 8)
+		if len(cands) == 0 {
+			return errors.New("the host announced no usable address.")
+		}
+		eps := netutil.LocalEndpoints(port, exclude)
+		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		me, err := c.prober.Discover(dctx, c.sendTo, c.cfg.STUNServers)
+		cancel()
+		if err == nil {
+			eps = append([]string{me.Public.String()}, eps...)
+			c.mu.Lock()
+			c.public = me.Public.String()
+			c.mu.Unlock()
+		} else {
+			c.cfg.Logf("client: cannot determine public address: %v", err)
+		}
+		knock = rendezvous.Message{Role: rendezvous.RoleKnock, Endpoints: eps}
+	}
+
+	// 2. Handshake.
+	where := cands[0].String()
+	if rv != nil {
+		where = "the host"
+	}
+	c.setState(c.currentState(), "Contacting "+where+"…")
 	eph, err := proto.NewEphemeral()
 	if err != nil {
 		return err
 	}
-	hs := &handshake{eph: eph, result: make(chan handshakeResult, 1)}
+	hs := &handshake{eph: eph, cands: cands, result: make(chan handshakeResult, 1)}
 	c.mu.Lock()
 	c.hs = hs
 	c.mu.Unlock()
@@ -324,11 +384,25 @@ func (c *Client) connect(ctx context.Context) error {
 		c.mu.Unlock()
 	}()
 	hello := proto.BuildHello(c.psk, eph)
+	attempts := handshakeAttempts
+	if rv != nil {
+		attempts = punchAttempts
+	}
 	var res handshakeResult
 	got := false
-	for i := 0; i < handshakeAttempts && !got; i++ {
-		if _, err := c.conn.WriteToUDPAddrPort(hello, server); err != nil {
-			return fmt.Errorf("cannot reach %s: %v.", server, err)
+	for i := 0; i < attempts && !got; i++ {
+		if rv != nil && i%4 == 0 {
+			// Ask the host to punch towards us; repeated in case it missed it.
+			go func() {
+				if err := rv.Publish(ctx, knock); err != nil && ctx.Err() == nil {
+					c.cfg.Logf("client: knock: %v", err)
+				}
+			}()
+		}
+		for _, to := range cands {
+			if _, err := c.conn.WriteToUDPAddrPort(hello, to); err != nil && len(cands) == 1 {
+				return fmt.Errorf("cannot reach %s: %v.", to, err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -339,8 +413,14 @@ func (c *Client) connect(ctx context.Context) error {
 		}
 	}
 	if !got {
-		return fmt.Errorf("no answer from server %s. Check the server address, that the host's UDP port is open/forwarded, and that the network name and password are exactly right.", server)
+		if rv != nil {
+			return errors.New("found the host but could not get through. One of the routers blocks direct connections; if this keeps happening, let another friend host or use a VPS server.")
+		}
+		return fmt.Errorf("no answer from server %s. Check the server address, that the network name and password are exactly right, and that the host is online. You can also leave the server address empty to find the host automatically.", cands[0])
 	}
+	c.mu.Lock()
+	c.server = res.from
+	c.mu.Unlock()
 	sealer, err := proto.NewSealer(res.keys.ClientToServer, proto.TypeTransport, res.sid, 0)
 	if err != nil {
 		return err
@@ -355,7 +435,6 @@ func (c *Client) connect(ctx context.Context) error {
 	c.peers = map[uint32]*peer{}
 	c.peersByIP = map[netip.Addr]*peer{}
 	c.peersVersion = 0
-	exclude := c.addr
 	c.mu.Unlock()
 	drain(c.lostCh)
 	drainCfg(c.configCh)
@@ -366,7 +445,7 @@ func (c *Client) connect(ctx context.Context) error {
 		Type:      proto.MsgJoin,
 		ClientID:  c.cfg.ClientID,
 		Name:      c.cfg.Name,
-		LocalAddr: localEndpoints(c.conn.LocalAddr().(*net.UDPAddr).Port, exclude),
+		LocalAddr: netutil.LocalEndpoints(port, exclude),
 		AppVer:    c.cfg.AppVersion,
 	}
 	var cfg *proto.Control
@@ -518,6 +597,11 @@ func since(b []byte) (time.Duration, bool) {
 	return d, true
 }
 
+func (c *Client) sendTo(p []byte, to netip.AddrPort) error {
+	_, err := c.conn.WriteToUDPAddrPort(p, to)
+	return err
+}
+
 func (c *Client) sendServer(kind byte, payload []byte) {
 	c.mu.Lock()
 	sealer, server := c.sealer, c.server
@@ -589,6 +673,10 @@ func (c *Client) readLoop() {
 		}
 		from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
 		p := buf[:n]
+		if stun.IsMessage(p) {
+			c.prober.Handle(p)
+			continue
+		}
 		switch p[0] {
 		case proto.TypeWelcome:
 			c.handleWelcome(p, from)
@@ -604,9 +692,9 @@ func (c *Client) readLoop() {
 
 func (c *Client) handleWelcome(p []byte, from netip.AddrPort) {
 	c.mu.Lock()
-	hs, server := c.hs, c.server
+	hs := c.hs
 	c.mu.Unlock()
-	if hs == nil || from != server {
+	if hs == nil || !slices.Contains(hs.cands, from) {
 		return
 	}
 	sid, keys, err := proto.ClientFinish(c.psk, hs.eph, p)
@@ -614,7 +702,7 @@ func (c *Client) handleWelcome(p []byte, from netip.AddrPort) {
 		return
 	}
 	select {
-	case hs.result <- handshakeResult{sid, keys}:
+	case hs.result <- handshakeResult{sid, keys, from}:
 	default:
 	}
 }
@@ -798,33 +886,4 @@ func resolve(server string) (netip.AddrPort, error) {
 	}
 	ap := addr.AddrPort()
 	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), nil
-}
-
-// localEndpoints lists this computer's LAN addresses, so members behind the
-// same router can talk to each other directly.
-func localEndpoints(port int, exclude netip.Prefix) []string {
-	var out []string
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	for _, a := range addrs {
-		ipn, ok := a.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		ip, ok := netip.AddrFromSlice(ipn.IP)
-		if !ok {
-			continue
-		}
-		ip = ip.Unmap()
-		if !ip.Is4() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || (exclude.IsValid() && exclude.Contains(ip)) {
-			continue
-		}
-		out = append(out, netip.AddrPortFrom(ip, uint16(port)).String())
-		if len(out) == 6 {
-			break
-		}
-	}
-	return out
 }

@@ -4,7 +4,7 @@ A private "virtual LAN" for friends in different places. Install it on your Wind
 
 - **Play LAN games together** – Warcraft III, StarCraft, Age of Empires, Minecraft LAN worlds and similar games find each other through LAN broadcasts, which BOKALBS VPN forwards.
 - **Share files** – share a folder from inside the app with one click, or use normal Windows file sharing (`\\10.77.0.2`, "Map network drive").
-- **No account, no third-party service** – one friend hosts the network from the app, or you run the small server on a VPS or Raspberry Pi.
+- **No account, no port forwarding needed** – one friend hosts the network from the app; friends find the host by network name and connect through both routers (UDP hole punching). A VPS or Raspberry Pi server is optional.
 - **Encrypted** – everything is end-to-end encrypted with modern cryptography (X25519, ChaCha20-Poly1305, Argon2id).
 - **Fast** – PCs connect **directly to each other** (UDP hole punching) whenever possible, and fall back to relaying through the host.
 
@@ -23,12 +23,14 @@ One person **hosts**, everyone else **joins**.
 ### Host (one friend)
 
 1. Choose **Host a network**, enter a nickname, a network name and a password (6+ characters), then click **Start hosting**.
-2. The app tries to open UDP port **47820** on your router automatically (UPnP). If it can't, add a port-forwarding rule on the router: **UDP 47820 → this PC**.
+2. A green box saying **Friends can join without port forwarding** means you're ready. You don't need router access.
 3. Click **Copy invite** and send it to your friends. Tell them the password separately.
+
+If the box warns about **symmetric NAT / CGNAT**, your internet provider doesn't allow hole punching. Let another friend host, forward **UDP 47820 → this PC** on the router, or use a VPS (below).
 
 ### Join (everyone else)
 
-1. Choose **Join a network** and enter the host's address (for example `203.0.113.7:47820`), the network name and the password.
+1. Choose **Join a network**, leave **Server address** empty, and enter the network name and the password. (Only type a server address if your host gives you one, for example a VPS.)
 2. Click **Join network**. Your VPN address appears (for example `10.77.0.3`), and you see the other players in the list. **direct** means a peer-to-peer connection. **via server** means traffic goes through the host. Both work.
 
 ### Warcraft III
@@ -53,7 +55,7 @@ If nobody can open a port at home, for example because the internet provider use
 ./bokalbs-vpn-cli-linux-amd64 server -network friday-lan -password 'a-long-password' -leases leases.json
 ```
 
-Open UDP port 47820 in the machine's firewall. Then everyone, including you, picks **Join a network** with `your-server-ip:47820`.
+Open UDP port 47820 in the machine's firewall. Then everyone, including you, picks **Join a network** with `your-server-ip:47820`. A server behind a router you can't configure can add `-no-port-forwarding`, so players find it by network name instead.
 
 ## How it works
 
@@ -67,6 +69,7 @@ Open UDP port 47820 in the machine's firewall. Then everyone, including you, pic
 
 - **Virtual adapter:** [Wintun](https://www.wintun.net/), the adapter used by WireGuard, appears in Windows as `BOKALBS-VPN` with an address in `10.77.0.0/24`. Only VPN addresses are routed through it. Your normal internet traffic is not affected.
 - **Login:** the network password is stretched with Argon2id into a key. That key authenticates a fresh X25519 key exchange, so a wrong password never gets in and every session has new keys.
+- **No port forwarding:** the host learns its public address from public STUN servers and posts it, encrypted with a key derived from the network password, to a topic on [ntfy.sh](https://ntfy.sh) whose name is also derived from the password. A joining friend reads it and posts their own address the same way. Both sides then send packets to each other at the same time, which opens both routers (UDP hole punching). ntfy.sh only sees encrypted text. This works with most home routers; it does not work when a router uses symmetric NAT, which the app detects and reports.
 - **Direct connections:** the server tells each member how to reach the others, and the members punch through their NATs with encrypted pings. When that fails (symmetric NAT), traffic is relayed through the server.
 - **LAN games:** Windows sends broadcasts (`255.255.255.255`, `10.77.0.255`) and multicast into the adapter, because the app gives the adapter the lowest interface metric. The server copies them to every member.
 - **Firewall:** while connected, a Windows Firewall rule allows inbound traffic to your VPN address, and only from VPN addresses. The network is marked **Private** so file sharing works.
@@ -94,6 +97,8 @@ The Windows app also needs `wintun.dll` (amd64) from [wintun.net](https://www.wi
 | `internal/app`, `internal/ui` | Desktop app logic and interface |
 | `internal/share` | Read-only folder sharing over the VPN |
 | `internal/portmap` | Automatic router port forwarding (UPnP) |
+| `internal/stun`, `internal/rendezvous` | Joining without port forwarding (public address discovery, encrypted meeting point) |
+| `tools/rvserve` | Local stand-ins for ntfy and STUN, for testing hole punching |
 | `installer` | Inno Setup installer script |
 
 ## Limits

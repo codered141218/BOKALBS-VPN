@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/codered141218/bokalbs-vpn/internal/client"
 	"github.com/codered141218/bokalbs-vpn/internal/proto"
+	"github.com/codered141218/bokalbs-vpn/internal/rendezvous/rvtest"
 	"github.com/codered141218/bokalbs-vpn/internal/server"
 	"github.com/codered141218/bokalbs-vpn/internal/tunnel"
 )
@@ -309,4 +313,69 @@ func TestServerRestart(t *testing.T) {
 			t.Fatal("no traffic after server restart")
 		}
 	}
+}
+
+func TestJoinWithoutServerAddress(t *testing.T) {
+	ntfy := httptest.NewServer(rvtest.NewNtfy())
+	defer ntfy.Close() // runs after cancel, which ends the open subscriptions
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stunConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stunConn.Close()
+	go rvtest.ServeSTUN(stunConn)
+	stunServers := []string{stunConn.LocalAddr().String()}
+
+	joinRV := func(name, id string) *member {
+		m := &member{dev: make(chan *fakeDev, 1)}
+		c, err := client.Start(ctx, client.Config{
+			Network: "lan-party", Password: "hunter2", Name: name, ClientID: id,
+			Rendezvous: ntfy.URL, STUNServers: stunServers,
+			OpenDevice: func(a netip.Prefix) (tunnel.Device, error) {
+				d := &fakeDev{addr: a, toNet: make(chan []byte, 64), fromNet: make(chan []byte, 64), closed: make(chan struct{})}
+				m.dev <- d
+				return d, nil
+			},
+			Logf: func(f string, a ...any) { t.Logf(name+": "+f, a...) },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.c = c
+		t.Cleanup(c.Stop)
+		return m
+	}
+
+	// Nobody hosts yet: the player is told so and keeps trying.
+	early := joinRV("early", "early-pc")
+	waitFor(t, "no-host message", 10*time.Second, func() bool {
+		return strings.Contains(early.c.Status().Message, "nobody is hosting")
+	})
+
+	srv, err := server.New(server.Config{Listen: "127.0.0.1:0", Network: "lan-party", Password: "hunter2",
+		Rendezvous: ntfy.URL, STUNServers: stunServers, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Listen(); err != nil {
+		t.Fatal(err)
+	}
+	go srv.Run(ctx)
+	waitFor(t, "host announced", 10*time.Second, func() bool { return srv.NAT().Announced })
+	if nat := srv.NAT(); nat.Public != srv.Addr().String() || nat.Symmetric {
+		t.Fatalf("unexpected NAT status %+v", nat)
+	}
+
+	late := joinRV("late", "late-pc")
+	for _, m := range []*member{early, late} {
+		waitFor(t, "connected through rendezvous", 30*time.Second, func() bool {
+			st := m.c.Status()
+			return st.State == client.StateConnected && len(st.Peers) == 1
+		})
+	}
+	a, b := early.device(t), late.device(t)
+	a.toNet <- udpPacket(a.addr.Addr(), proto.LastAddr(a.addr), 6112, "found you")
+	expectPacket(t, b, "found you")
 }

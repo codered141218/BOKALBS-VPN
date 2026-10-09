@@ -7,6 +7,7 @@
 //	Transport client <-> server  [type][session id 4][counter 8][AEAD ciphertext]
 //	Peer      client <-> client  [type][sender session id 4][counter 8][AEAD ciphertext]
 //	Reset     server -> client   [type][session id 4]  ("I don't know this session")
+//	Punch     server -> client   [type]  (opens the server's router for a player)
 //
 // The network password is stretched with Argon2id into a pre-shared key (PSK).
 // The PSK authenticates the handshake (HMAC on Hello) and is mixed into the
@@ -42,6 +43,7 @@ const (
 	TypeTransport = 0x03
 	TypePeer      = 0x04
 	TypeReset     = 0x05
+	TypePunch     = 0x06 // hole punching; carries nothing and is ignored
 
 	HelloLen   = 1 + 1 + 32 + 16
 	WelcomeLen = 1 + 32 + 4 + 16

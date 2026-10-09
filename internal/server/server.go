@@ -24,7 +24,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codered141218/bokalbs-vpn/internal/netutil"
 	"github.com/codered141218/bokalbs-vpn/internal/proto"
+	"github.com/codered141218/bokalbs-vpn/internal/rendezvous"
+	"github.com/codered141218/bokalbs-vpn/internal/stun"
 )
 
 const (
@@ -45,6 +48,11 @@ type Config struct {
 	Subnet    netip.Prefix // virtual network, defaults to 10.77.0.0/24
 	LeaseFile string       // optional file remembering which device got which IP
 	Logf      func(format string, args ...any)
+
+	// Rendezvous, when set, is the URL of an ntfy-compatible service used
+	// so players can connect without port forwarding (see package rendezvous).
+	Rendezvous  string
+	STUNServers []string // defaults to stun.Servers()
 }
 
 type session struct {
@@ -68,6 +76,14 @@ type Server struct {
 	psk        []byte
 	pairSecret []byte
 	conn       *net.UDPConn
+
+	prober stun.Prober
+
+	natMu    sync.Mutex
+	nat      NATStatus
+	punchMu  sync.Mutex
+	punched  map[netip.AddrPort]time.Time
+	announce chan struct{}
 
 	mu           sync.Mutex
 	sessions     map[uint32]*session
@@ -94,6 +110,9 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+	if len(cfg.STUNServers) == 0 {
+		cfg.STUNServers = stun.Servers()
+	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, err
@@ -105,6 +124,8 @@ func New(cfg Config) (*Server, error) {
 		sessions:   map[uint32]*session{},
 		byIP:       map[netip.Addr]*session{},
 		leases:     map[string]netip.Addr{},
+		punched:    map[netip.AddrPort]time.Time{},
+		announce:   make(chan struct{}, 1),
 	}
 	s.loadLeases()
 	return s, nil
@@ -143,6 +164,9 @@ func (s *Server) Run(ctx context.Context) error {
 		s.conn.Close()
 	}()
 	go s.housekeeping(ctx)
+	if s.cfg.Rendezvous != "" {
+		go s.rendezvousLoop(ctx)
+	}
 
 	buf := make([]byte, maxPacket)
 	for {
@@ -161,6 +185,10 @@ func (s *Server) Run(ctx context.Context) error {
 				continue
 			}
 			return err
+		}
+		if stun.IsMessage(buf[:n]) {
+			s.prober.Handle(buf[:n])
+			continue
 		}
 		s.handle(buf[:n], unmap(from))
 	}
@@ -516,5 +544,123 @@ func (s *Server) saveLeasesLocked() {
 	tmp := s.cfg.LeaseFile + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
 		_ = os.Rename(tmp, s.cfg.LeaseFile)
+	}
+}
+
+// NATStatus tells whether players can reach this server without port
+// forwarding.
+type NATStatus struct {
+	Checked   bool   `json:"checked"`
+	Public    string `json:"public,omitempty"`    // public address of the server socket
+	Symmetric bool   `json:"symmetric,omitempty"` // router changes ports: punching unlikely to work
+	Announced bool   `json:"announced,omitempty"` // players can find this server by network name
+	Error     string `json:"error,omitempty"`
+}
+
+// NAT returns the current hole-punching status.
+func (s *Server) NAT() NATStatus {
+	s.natMu.Lock()
+	defer s.natMu.Unlock()
+	return s.nat
+}
+
+func (s *Server) setNAT(f func(*NATStatus)) {
+	s.natMu.Lock()
+	f(&s.nat)
+	s.natMu.Unlock()
+}
+
+// rendezvousLoop keeps the server findable: it learns its public address
+// with STUN, announces it, and punches towards players who knock.
+func (s *Server) rendezvousLoop(ctx context.Context) {
+	rv := rendezvous.New(s.cfg.Rendezvous, s.psk)
+	go rv.Subscribe(ctx, func(m rendezvous.Message) {
+		if m.Role != rendezvous.RoleKnock || time.Since(time.Unix(m.Time, 0)) > 2*time.Minute {
+			return
+		}
+		eps := netutil.ParseEndpoints(m.Endpoints, 8)
+		s.cfg.Logf("server: a player is knocking from %v; opening the way", eps)
+		go s.punch(ctx, eps)
+		// A player is looking for us: make sure our announcement is fresh.
+		select {
+		case s.announce <- struct{}{}:
+		default:
+		}
+	})
+
+	send := func(p []byte, to netip.AddrPort) error {
+		_, err := s.conn.WriteToUDPAddrPort(p, to)
+		return err
+	}
+	port := s.conn.LocalAddr().(*net.UDPAddr).Port
+	var lastPublic netip.AddrPort
+	var lastAnnounce time.Time
+	check := time.NewTicker(25 * time.Second) // also keeps the router mapping alive
+	defer check.Stop()
+	forced := true
+	for {
+		res, err := s.prober.Discover(ctx, send, s.cfg.STUNServers)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			s.setNAT(func(n *NATStatus) { n.Checked, n.Error = true, "cannot determine public address: "+err.Error() })
+		} else {
+			s.setNAT(func(n *NATStatus) {
+				n.Checked, n.Error, n.Public, n.Symmetric = true, "", res.Public.String(), res.Symmetric
+			})
+		}
+		if err == nil && (forced || res.Public != lastPublic || time.Since(lastAnnounce) > 5*time.Minute) {
+			eps := append([]string{res.Public.String()}, netutil.LocalEndpoints(port, s.cfg.Subnet)...)
+			if perr := rv.Publish(ctx, rendezvous.Message{Role: rendezvous.RoleHost, Endpoints: eps}); perr != nil {
+				s.cfg.Logf("server: announcing on rendezvous service failed: %v", perr)
+				s.setNAT(func(n *NATStatus) { n.Announced, n.Error = false, perr.Error() })
+			} else {
+				if res.Public != lastPublic && res.Symmetric {
+					s.cfg.Logf("server: public address %s, but the router changes ports for every connection (symmetric NAT); players may not get through", res.Public)
+				} else if res.Public != lastPublic {
+					s.cfg.Logf("server: players can join without port forwarding (public address %s)", res.Public)
+				}
+				lastPublic, lastAnnounce, forced = res.Public, time.Now(), false
+				s.setNAT(func(n *NATStatus) { n.Announced = true })
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-check.C:
+		case <-s.announce:
+			forced = true
+		}
+	}
+}
+
+// punch sends a few packets towards a player so this side's router lets the
+// player's packets in.
+func (s *Server) punch(ctx context.Context, eps []netip.AddrPort) {
+	now := time.Now()
+	s.punchMu.Lock()
+	var todo []netip.AddrPort
+	for _, ep := range eps {
+		if now.Sub(s.punched[ep]) > 2*time.Second {
+			s.punched[ep] = now
+			todo = append(todo, ep)
+		}
+	}
+	for ep, t := range s.punched {
+		if now.Sub(t) > time.Minute {
+			delete(s.punched, ep)
+		}
+	}
+	s.punchMu.Unlock()
+	for i := 0; i < 5 && len(todo) > 0; i++ {
+		for _, ep := range todo {
+			s.send(ep, []byte{proto.TypePunch})
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(400 * time.Millisecond):
+		}
 	}
 }
