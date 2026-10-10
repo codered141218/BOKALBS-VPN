@@ -4,8 +4,11 @@ package ui
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 func opener() string {
@@ -26,4 +29,16 @@ func openExplorer(path string) error {
 
 func pickFolder() (string, error) {
 	return "", errors.New("type the folder path")
+}
+
+func openPath(p string) error { return exec.Command(opener(), p).Start() }
+
+func revealPath(p string) error { return openPath(filepath.Dir(p)) }
+
+// pickFiles has no native dialog here; tests and the CLI pass paths directly.
+func pickFiles() ([]string, error) {
+	if v := os.Getenv("BOKALBS_PICK_FILES"); v != "" {
+		return strings.Split(v, string(os.PathListSeparator)), nil
+	}
+	return nil, errors.New("choosing files is only supported on Windows")
 }

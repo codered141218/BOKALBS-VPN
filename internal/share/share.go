@@ -5,6 +5,7 @@ package share
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net"
@@ -21,6 +22,24 @@ import (
 )
 
 const Port = 47821
+
+// ListPath answers folder listings as JSON, for the app's file browser.
+const ListPath = "/.bokalbs/list"
+
+// Listing is one folder of a shared folder.
+type Listing struct {
+	Owner   string  `json:"owner"`
+	Path    string  `json:"path"`
+	Entries []Entry `json:"entries"`
+}
+
+// Entry is a file or folder in a Listing.
+type Entry struct {
+	Name     string `json:"name"`
+	Dir      bool   `json:"dir"`
+	Size     int64  `json:"size"`
+	Modified int64  `json:"modified"` // unix seconds
+}
 
 // Server is a running folder share.
 type Server struct {
@@ -95,6 +114,10 @@ func handler(root, name string) http.Handler {
 			http.Error(w, "read-only share", http.StatusMethodNotAllowed)
 			return
 		}
+		if r.URL.Path == ListPath {
+			listJSON(w, root, name, r.URL.Query().Get("path"))
+			return
+		}
 		clean := path.Clean("/" + r.URL.Path)
 		full := filepath.Join(root, filepath.FromSlash(clean))
 		st, err := os.Stat(full)
@@ -157,4 +180,35 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func listJSON(w http.ResponseWriter, root, owner, dir string) {
+	clean := path.Clean("/" + dir)
+	full := filepath.Join(root, filepath.FromSlash(clean))
+	list, err := os.ReadDir(full)
+	if err != nil {
+		http.Error(w, "folder not found", http.StatusNotFound)
+		return
+	}
+	out := Listing{Owner: owner, Path: clean, Entries: []Entry{}}
+	for _, e := range list {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		en := Entry{Name: e.Name(), Dir: e.IsDir(), Modified: info.ModTime().Unix()}
+		if !en.Dir {
+			en.Size = info.Size()
+		}
+		out.Entries = append(out.Entries, en)
+	}
+	sort.Slice(out.Entries, func(i, j int) bool {
+		a, b := out.Entries[i], out.Entries[j]
+		if a.Dir != b.Dir {
+			return a.Dir
+		}
+		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }

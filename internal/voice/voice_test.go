@@ -3,32 +3,43 @@ package voice
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"net/http"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/codered141218/bokalbs-vpn/internal/peer"
 )
 
 func TestSignalBetweenApps(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a, b := netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.3")
-	members := func(ip netip.Addr) bool { return ip == a || ip == b }
-	ha, hb := NewHub(members), NewHub(members)
+	member := true
+	members := func(ip netip.Addr) bool { return member && (ip == a || ip == b) }
+	hb := peer.NewHub(members)
+	Register(hb)
 	if err := hb.Listen(ctx, b); err != nil {
 		t.Skip("cannot listen on 127.0.0.3:", err)
 	}
 	defer hb.Close()
-
 	events, stop := hb.Subscribe()
 	defer stop()
-	if ev := <-events; ev.Kind != "keys" {
-		t.Fatalf("first event %+v", ev)
-	}
 
-	// Sent from 127.0.0.2: bind the client to a's address so b sees it as the sender.
-	ha.client.Transport.(*httpTransport).DialContext = dialFrom(a)
-	if err := ha.Send(ctx, b, json.RawMessage(`{"t":"hello","team":2}`)); err != nil {
-		t.Fatal(err)
+	// Sent from 127.0.0.2: the receiver identifies the sender by its address.
+	d := &net.Dialer{LocalAddr: &net.TCPAddr{IP: a.AsSlice()}}
+	c := &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: d.DialContext}}
+	post := func(body string) int {
+		resp, err := c.Post(peer.URL(b, signalPath), "application/json", stringsReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post(`{"t":"hello","team":2}`); code != http.StatusNoContent {
+		t.Fatalf("status %d", code)
 	}
 	select {
 	case ev := <-events:
@@ -38,24 +49,29 @@ func TestSignalBetweenApps(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("signal not delivered")
 	}
-
-	// Strangers are refused.
-	hb.IsMember = func(ip netip.Addr) bool { return false }
-	if err := ha.Send(ctx, b, json.RawMessage(`{}`)); err == nil {
-		t.Fatal("message from a non-member accepted")
+	member = false
+	if code := post(`{}`); code != http.StatusForbidden {
+		t.Fatalf("non-member got %d", code)
 	}
-	if err := ha.Send(ctx, netip.MustParseAddr("127.0.0.9"), json.RawMessage(`{}`)); err == nil {
+	if err := Send(ctx, hb, netip.MustParseAddr("127.0.0.9"), json.RawMessage(`{}`)); err == nil {
 		t.Fatal("sent to a non-member")
 	}
 
-	hb.SetKeys(true, false)
+	var ks keyState
+	ks.set(hb, true, false)
 	if ev := <-events; ev.Kind != "keys" || !ev.Team || ev.All {
 		t.Fatalf("keys event %+v", ev)
 	}
-	hb.SetKeys(true, false) // unchanged: no event
+	ks.set(hb, true, false) // unchanged: no event
 	select {
 	case ev := <-events:
 		t.Fatalf("unexpected %+v", ev)
 	case <-time.After(100 * time.Millisecond):
+	}
+	// A window opened later learns the current key state.
+	late, stop2 := hb.Subscribe()
+	defer stop2()
+	if ev := <-late; ev.Kind != "keys" || !ev.Team {
+		t.Fatalf("late window got %+v", ev)
 	}
 }

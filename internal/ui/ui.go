@@ -13,13 +13,16 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/codered141218/bokalbs-vpn/internal/app"
 	"github.com/codered141218/bokalbs-vpn/internal/config"
+	"github.com/codered141218/bokalbs-vpn/internal/files"
 	"github.com/codered141218/bokalbs-vpn/internal/share"
+	"github.com/codered141218/bokalbs-vpn/internal/voice"
 )
 
 //go:embed index.html
@@ -60,6 +63,19 @@ func Start(a *app.App) (*UI, error) {
 	mux.HandleFunc("/api/voice/events", u.voiceEvents)
 	mux.HandleFunc("/api/voice/send", u.api(u.voiceSend))
 	mux.HandleFunc("/api/voice/settings", u.api(u.voiceSettings))
+	mux.HandleFunc("/api/files/list", u.api(u.filesList))
+	mux.HandleFunc("/api/files/download", u.api(u.filesDownload))
+	mux.HandleFunc("/api/files/pick", u.api(u.filesPick))
+	mux.HandleFunc("/api/files/send", u.api(u.filesSend))
+	mux.HandleFunc("/api/files/answer", u.api(u.filesAnswer))
+	mux.HandleFunc("/api/files/open", u.api(u.filesOpen))
+	mux.HandleFunc("/api/files/cancel", u.api(u.filesCancel))
+	mux.HandleFunc("/api/files/clear", u.api(u.filesClear))
+	mux.HandleFunc("/api/remote/request", u.api(u.remoteRequest))
+	mux.HandleFunc("/api/remote/answer", u.api(u.remoteAnswer))
+	mux.HandleFunc("/api/remote/stop", u.api(u.remoteStop))
+	mux.HandleFunc("/api/remote/input", u.api(u.remoteInput))
+	mux.HandleFunc("/api/remote/stream", u.remoteStream)
 	u.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go u.srv.Serve(ln)
 	return u, nil
@@ -191,7 +207,7 @@ func (u *UI) voiceEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
-	events, stop := u.app.Voice.Subscribe()
+	events, stop := u.app.Peer.Subscribe()
 	defer stop()
 	ping := time.NewTicker(20 * time.Second)
 	defer ping.Stop()
@@ -225,7 +241,7 @@ func (u *UI) voiceSend(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, errors.New("invalid address")
 	}
-	return nil, u.app.Voice.Send(r.Context(), ip, req.Msg)
+	return nil, voice.Send(r.Context(), u.app.Peer, ip, req.Msg)
 }
 
 func (u *UI) voiceSettings(r *http.Request) (any, error) {
@@ -244,4 +260,190 @@ func (u *UI) voiceSettings(r *http.Request) (any, error) {
 func (u *UI) quitHandler(r *http.Request) (any, error) {
 	u.once.Do(func() { close(u.quit) })
 	return nil, nil
+}
+
+// ----- files -----
+
+func memberIP(u *UI, s string) (netip.Addr, error) {
+	ip, err := netip.ParseAddr(s)
+	if err != nil || !u.app.IsMemberIP(ip) {
+		return netip.Addr{}, errors.New("that player is not on the network")
+	}
+	return ip, nil
+}
+
+func (u *UI) filesList(r *http.Request) (any, error) {
+	var req struct{ IP, Path string }
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	ip, err := memberIP(u, req.IP)
+	if err != nil {
+		return nil, err
+	}
+	return u.app.Files.List(r.Context(), ip, req.Path)
+}
+
+func (u *UI) filesDownload(r *http.Request) (any, error) {
+	var req struct {
+		IP   string `json:"ip"`
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	ip, err := memberIP(u, req.IP)
+	if err != nil {
+		return nil, err
+	}
+	id, err := u.app.Files.Download(ip, req.Path, req.Size)
+	return map[string]string{"id": id}, err
+}
+
+func (u *UI) filesPick(r *http.Request) (any, error) {
+	paths, err := pickFiles()
+	if err != nil {
+		return nil, err
+	}
+	return map[string][]string{"paths": paths}, nil
+}
+
+func (u *UI) filesSend(r *http.Request) (any, error) {
+	var req struct {
+		IP    string   `json:"ip"`
+		Paths []string `json:"paths"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	ip, err := memberIP(u, req.IP)
+	if err != nil {
+		return nil, err
+	}
+	return nil, u.app.Files.Send(r.Context(), ip, req.Paths)
+}
+
+func (u *UI) filesAnswer(r *http.Request) (any, error) {
+	var req struct {
+		From   string `json:"from"`
+		ID     string `json:"id"`
+		Accept bool   `json:"accept"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	ip, err := netip.ParseAddr(req.From)
+	if err != nil {
+		return nil, err
+	}
+	return nil, u.app.Files.Answer(r.Context(), ip, req.ID, req.Accept)
+}
+
+func (u *UI) filesOpen(r *http.Request) (any, error) {
+	var req struct {
+		ID     string `json:"id"`
+		Reveal bool   `json:"reveal"`
+		Folder bool   `json:"folder"` // open the downloads folder
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Folder {
+		dir := files.DownloadDir()
+		_ = os.MkdirAll(dir, 0o755)
+		return nil, openPath(dir)
+	}
+	p, ok := u.app.Files.LocalPath(req.ID)
+	if !ok {
+		return nil, errors.New("file not found")
+	}
+	if req.Reveal {
+		return nil, revealPath(p)
+	}
+	return nil, openPath(p)
+}
+
+func (u *UI) filesCancel(r *http.Request) (any, error) {
+	var req struct{ ID string }
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	u.app.Files.Cancel(req.ID)
+	return nil, nil
+}
+
+func (u *UI) filesClear(r *http.Request) (any, error) {
+	u.app.Files.ClearFinished()
+	return nil, nil
+}
+
+// ----- remote desktop -----
+
+func (u *UI) remoteRequest(r *http.Request) (any, error) {
+	var req struct {
+		IP      string `json:"ip"`
+		Control bool   `json:"control"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	ip, err := memberIP(u, req.IP)
+	if err != nil {
+		return nil, err
+	}
+	id, err := u.app.Remote.Request(r.Context(), ip, req.Control)
+	return map[string]string{"id": id}, err
+}
+
+func (u *UI) remoteAnswer(r *http.Request) (any, error) {
+	var req struct {
+		ID      string `json:"id"`
+		Allow   bool   `json:"allow"`
+		Control bool   `json:"control"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	return nil, u.app.Remote.Answer(r.Context(), req.ID, req.Allow, req.Control)
+}
+
+func (u *UI) remoteStop(r *http.Request) (any, error) {
+	var req struct{ ID string }
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	u.app.Remote.Stop(r.Context(), req.ID)
+	return nil, nil
+}
+
+func (u *UI) remoteInput(r *http.Request) (any, error) {
+	var req struct {
+		ID     string          `json:"id"`
+		Events json.RawMessage `json:"events"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	return nil, u.app.Remote.Input(r.Context(), req.ID, req.Events)
+}
+
+// remoteStream passes the remote screen through to the viewer window. Like
+// the event stream it carries its token in the query.
+func (u *UI) remoteStream(w http.ResponseWriter, r *http.Request) {
+	if r.Host != u.host || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), []byte(u.token)) != 1 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	fl, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	err := u.app.Remote.Stream(r.Context(), r.URL.Query().Get("id"), w, func() {
+		if fl != nil {
+			fl.Flush()
+		}
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
 }

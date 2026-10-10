@@ -2,10 +2,16 @@
 
 package voice
 
-import "context"
+import (
+	"context"
+
+	"github.com/codered141218/bokalbs-vpn/internal/peer"
+)
 
 // WatchKeys is only implemented on Windows; elsewhere use the on-screen
 // talk buttons.
-func (h *Hub) WatchKeys(ctx context.Context, keys func() (team, all string)) {
+func WatchKeys(ctx context.Context, h *peer.Hub, keys func() (team, all string)) {
+	var st keyState
+	st.set(h, false, false)
 	<-ctx.Done()
 }

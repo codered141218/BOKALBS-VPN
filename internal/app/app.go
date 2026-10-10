@@ -20,7 +20,10 @@ import (
 
 	"github.com/codered141218/bokalbs-vpn/internal/client"
 	"github.com/codered141218/bokalbs-vpn/internal/config"
+	"github.com/codered141218/bokalbs-vpn/internal/files"
+	"github.com/codered141218/bokalbs-vpn/internal/peer"
 	"github.com/codered141218/bokalbs-vpn/internal/portmap"
+	"github.com/codered141218/bokalbs-vpn/internal/remote"
 	"github.com/codered141218/bokalbs-vpn/internal/rendezvous"
 	"github.com/codered141218/bokalbs-vpn/internal/server"
 	"github.com/codered141218/bokalbs-vpn/internal/share"
@@ -62,6 +65,11 @@ type State struct {
 
 	VoiceKeys  []voice.Key `json:"voiceKeys"`            // selectable push-to-talk keys
 	VoiceError string      `json:"voiceError,omitempty"` // voice chat could not start
+
+	Transfers   []files.Transfer `json:"transfers"`
+	FileOffers  []files.Offer    `json:"fileOffers"`
+	DownloadDir string           `json:"downloadDir"`
+	Remote      []remote.Session `json:"remote"`
 }
 
 // App is the application state machine.
@@ -86,10 +94,16 @@ type App struct {
 	logFile  io.Writer
 	gen      int
 
-	// Voice is the voice chat hub (setup messages and push-to-talk keys).
-	Voice    *voice.Hub
-	voiceIP  netip.Addr
-	voiceErr string
+	// Peer is the channel to other members' apps and the event bus to the
+	// window (voice chat, file transfers, remote desktop).
+	Peer    *peer.Hub
+	peerIP  netip.Addr
+	peerErr string
+
+	Files  *files.Manager
+	Remote *remote.Manager
+	// Attention brings the window to the front (set by the window code).
+	Attention func()
 }
 
 // New creates the app and loads saved settings.
@@ -100,8 +114,15 @@ func New(version string) *App {
 			a.logFile = f
 		}
 	}
-	a.Voice = voice.NewHub(a.IsMemberIP)
-	go a.Voice.WatchKeys(context.Background(), func() (string, string) {
+	a.Peer = peer.NewHub(a.IsMemberIP)
+	voice.Register(a.Peer)
+	a.Files = files.New(a.Peer, a.MemberName, func() string {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.settings.Nickname
+	}, a.attention)
+	a.Remote = remote.New(a.Peer, a.MemberName, a.attention, a.Logf)
+	go voice.WatchKeys(context.Background(), a.Peer, func() (string, string) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		return a.settings.VoiceTeamKey, a.settings.VoiceAllKey
@@ -341,32 +362,33 @@ func (a *App) watch(ctx context.Context, c *client.Client) {
 			return
 		case <-t.C:
 			st := c.Status()
-			a.syncVoice(ctx, st)
+			a.syncPeer(ctx, st)
 			a.syncShare(ctx, st)
 		}
 	}
 }
 
-// syncVoice lets other members' apps reach this one for voice chat.
-func (a *App) syncVoice(ctx context.Context, st client.Status) {
+// syncPeer lets other members' apps reach this one (voice chat, files,
+// remote desktop).
+func (a *App) syncPeer(ctx context.Context, st client.Status) {
 	ip, err := netip.ParseAddr(st.IP)
 	if st.State != client.StateConnected || err != nil {
 		return
 	}
 	a.mu.Lock()
-	same := a.voiceIP == ip
+	same := a.peerIP == ip
 	a.mu.Unlock()
 	if same {
 		return
 	}
-	err = a.Voice.Listen(ctx, ip)
+	err = a.Peer.Listen(ctx, ip)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
-		a.voiceErr = err.Error()
+		a.peerErr = "voice chat, file sending and remote desktop are unavailable: " + err.Error()
 		return
 	}
-	a.voiceIP, a.voiceErr = ip, ""
+	a.peerIP, a.peerErr = ip, ""
 }
 
 // UpdateVoice changes the voice chat settings.
@@ -441,12 +463,13 @@ func (a *App) Disconnect() {
 	cancel, c, mapping, sh := a.cancel, a.client, a.mapping, a.share
 	a.cancel, a.srv, a.mapping, a.share, a.hosting = nil, nil, nil, nil, nil
 	a.shareIP, a.shareErr = netip.Addr{}, ""
-	a.voiceIP, a.voiceErr = netip.Addr{}, ""
+	a.peerIP, a.peerErr = netip.Addr{}, ""
 	a.mu.Unlock()
 	if cancel == nil {
 		return
 	}
-	a.Voice.Close()
+	a.Remote.StopAll()
+	a.Peer.Close()
 	if sh != nil {
 		sh.Close()
 	}
@@ -482,7 +505,9 @@ func (a *App) State() State {
 		Share:    ShareState{Active: a.share != nil, Error: a.shareErr},
 
 		VoiceKeys:  voice.Keys,
-		VoiceError: a.voiceErr,
+		VoiceError: a.peerErr,
+
+		DownloadDir: files.DownloadDir(),
 	}
 	if a.share != nil {
 		st.Share.URL = "http://" + a.share.Addr + "/"
@@ -500,11 +525,35 @@ func (a *App) State() State {
 	} else if last != nil {
 		st.Client = last
 	}
+	st.Transfers = a.Files.Transfers()
+	st.FileOffers = a.Files.Offers()
+	st.Remote = a.Remote.Sessions()
 	if st.Hosting != nil && srv != nil {
 		st.Hosting.Members = srv.Members()
 		st.Hosting.NAT = srv.NAT()
 	}
 	return st
+}
+
+func (a *App) attention() {
+	if a.Attention != nil {
+		a.Attention()
+	}
+}
+
+// MemberName returns the nickname of the member with this VPN address.
+func (a *App) MemberName(ip netip.Addr) string {
+	a.mu.Lock()
+	c := a.client
+	a.mu.Unlock()
+	if c != nil {
+		for _, p := range c.Status().Peers {
+			if p.IP == ip.String() {
+				return p.Name
+			}
+		}
+	}
+	return ip.String()
 }
 
 // IsMemberIP reports whether ip belongs to the connected VPN network.

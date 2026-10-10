@@ -46,3 +46,35 @@ func pickFolder() (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+func openPath(p string) error { return shellOpen(p) }
+
+func revealPath(p string) error {
+	return exec.Command("explorer.exe", "/select,", p).Start()
+}
+
+const pickFilesScript = `
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$owner = New-Object System.Windows.Forms.Form -Property @{TopMost = $true; ShowInTaskbar = $false}
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.Title = 'Choose files to send'
+$d.Multiselect = $true
+if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { $d.FileNames | ForEach-Object { Write-Output $_ } }
+`
+
+func pickFiles() ([]string, error) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", pickFilesScript)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, errors.New("could not open the file picker")
+	}
+	var paths []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			paths = append(paths, l)
+		}
+	}
+	return paths, nil
+}

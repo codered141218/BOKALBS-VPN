@@ -29,6 +29,7 @@ func main() {
 		return
 	}
 	a := app.New(version)
+	a.Attention = attention
 	a.Logf("BOKALBS VPN %s started", version)
 	u, err := ui.Start(a)
 	if err != nil {

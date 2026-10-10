@@ -24,7 +24,35 @@ var (
 	procFindWindowW     = user32.NewProc("FindWindowW")
 	procShowWindow      = user32.NewProc("ShowWindow")
 	procSetForegroundWn = user32.NewProc("SetForegroundWindow")
+	procIsIconic        = user32.NewProc("IsIconic")
+	procFlashWindowEx   = user32.NewProc("FlashWindowEx")
 )
+
+type flashInfo struct {
+	Size    uint32
+	Hwnd    uintptr
+	Flags   uint32
+	Count   uint32
+	Timeout uint32
+}
+
+// attention shows the window when a friend sends a file or asks for remote
+// access. If Windows keeps another program (a game) in front, the taskbar
+// button flashes instead.
+func attention() {
+	title, _ := windows.UTF16PtrFromString(windowTitle)
+	hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(title)))
+	if hwnd == 0 {
+		return
+	}
+	if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
+		procShowWindow.Call(hwnd, 9) // SW_RESTORE
+	}
+	procSetForegroundWn.Call(hwnd)
+	fi := flashInfo{Hwnd: hwnd, Flags: 0x3 | 0xC, Count: 5} // FLASHW_ALL | FLASHW_TIMERNOFG
+	fi.Size = uint32(unsafe.Sizeof(fi))
+	procFlashWindowEx.Call(uintptr(unsafe.Pointer(&fi)))
+}
 
 // singleInstance returns false (after focusing the existing window) when
 // BOKALBS VPN is already running.

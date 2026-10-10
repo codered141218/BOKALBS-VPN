@@ -93,6 +93,37 @@ select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid v
 .speaking .avatar { box-shadow: 0 0 0 3px var(--ok); }
 input[type=range] { width: 90px; accent-color: var(--accent); }
 button.on { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.backdrop { position: fixed; inset: 0; background: rgba(8, 10, 16, .55); display: grid; place-items: center; z-index: 20; padding: 16px; }
+.modal { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; width: min(460px, 100%); max-height: calc(100vh - 32px); overflow: auto; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+.wide-modal { width: min(820px, 100%); display: flex; flex-direction: column; }
+.modal-head { display: flex; align-items: center; gap: 10px; }
+.modal-head h2 { flex: 1; margin: 0; }
+.modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 10px; font-size: 13px; }
+.crumbs button { padding: 3px 8px; font-size: 13px; }
+.crumbs span { color: var(--muted); }
+.fb-list { border: 1px solid var(--line); border-radius: 10px; overflow: auto; min-height: 200px; max-height: 55vh; }
+.fb-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 90px 130px 100px; gap: 8px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--line); cursor: default; }
+.fb-row:first-child { border-top: 0; }
+.fb-row:hover { background: var(--panel-2); }
+.fb-row.dir { cursor: pointer; }
+.fb-row .nm { overflow-wrap: anywhere; font-weight: 500; }
+.fb-row .sz, .fb-row .dt { color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.fb-icon { font-size: 18px; text-align: center; }
+@media (max-width: 640px) { .fb-row { grid-template-columns: 28px minmax(0, 1fr) 90px; } .fb-row .dt, .fb-row .sz { display: none; } }
+.file-names { margin: 8px 0; padding-left: 18px; max-height: 200px; overflow: auto; }
+.progress { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; margin-top: 4px; }
+.progress div { height: 100%; background: var(--accent); width: 0; }
+.progress.done div { background: var(--ok); }
+.progress.bad div { background: var(--bad); }
+.banner { position: fixed; left: 0; right: 0; top: 0; z-index: 30; background: #c4314b; color: #fff; display: flex; gap: 12px; align-items: center; justify-content: center; padding: 8px 16px; font-weight: 600; }
+.banner button { background: #fff; color: #c4314b; border: 0; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 25; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow), 0 6px 24px rgba(0,0,0,.2); border-radius: 10px; padding: 10px 14px; display: flex; gap: 12px; align-items: center; max-width: calc(100% - 32px); }
+.viewer { position: fixed; inset: 0; z-index: 40; background: #05070b; display: flex; flex-direction: column; }
+.viewer-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.viewer-body { flex: 1; min-height: 0; display: grid; place-items: center; position: relative; }
+.viewer-body canvas { outline: none; background: #000; cursor: default; }
+.viewer-wait { position: absolute; color: #aab; }
 a { color: var(--accent); }
 </style>
 </head>
@@ -220,10 +251,22 @@ a { color: var(--accent); }
     <ul class="peers" id="voicePeers" style="margin-top:8px"></ul>
   </section>
 
+  <!-- Transfers -->
+  <section class="card" id="transfersCard">
+    <h2>File transfers</h2>
+    <p class="hint" style="margin-top:0">Click <b>Files</b> next to a player to browse what they share, or <b>Send file</b> to send them something. Received files are saved in <span id="dlDir"></span>.</p>
+    <ul class="peers" id="transfers"></ul>
+    <div class="empty" id="noTransfers">No transfers yet.</div>
+    <div class="row" style="margin-top:10px">
+      <button class="small" id="openDownloads">Open received files folder</button>
+      <button class="small" id="clearTransfers">Clear finished</button>
+    </div>
+  </section>
+
   <!-- Share -->
   <section class="card">
     <h2>Share a folder</h2>
-    <p class="hint" style="margin-top:0">Friends on the VPN can browse and download files from this folder (read-only). Nobody outside the VPN can see it.</p>
+    <p class="hint" style="margin-top:0">Pick a folder friends may browse and download from (they can't change anything). They click <b>Files</b> next to your name. Nobody outside the VPN can see it.</p>
     <label for="shareFolder">Folder</label>
     <div class="row">
       <input class="grow" type="text" id="shareFolder" placeholder="e.g. C:\Games\Warcraft III\Maps\Download">
@@ -269,6 +312,73 @@ a { color: var(--accent); }
     </details>
   </section>
 </main>
+
+<!-- Someone is viewing / controlling this PC -->
+<div class="banner hidden" id="rcBanner"><span id="rcBannerText"></span><button class="small" id="rcBannerStop">Stop</button></div>
+
+<!-- File browser -->
+<div class="backdrop hidden" id="fbModal">
+  <div class="modal wide-modal">
+    <div class="modal-head">
+      <h2 id="fbTitle">Shared files</h2>
+      <button class="small" id="fbClose">Close</button>
+    </div>
+    <div class="crumbs" id="fbCrumbs"></div>
+    <div class="row" style="margin:8px 0">
+      <input class="grow" type="text" id="fbSearch" placeholder="Search in this folder">
+      <button class="small" id="fbAll" title="Download every file in this folder">Download all</button>
+    </div>
+    <div class="fb-list" id="fbList"></div>
+    <div class="msg bad" id="fbMsg"></div>
+    <div class="modal-foot">
+      <span class="peer-sub">Downloads go to your received files folder.</span>
+      <button class="small" id="fbSmb" title="Open the player's Windows shared folders in Explorer">Open in Windows Explorer</button>
+    </div>
+  </div>
+</div>
+
+<!-- Incoming file offer -->
+<div class="backdrop hidden" id="offerModal">
+  <div class="modal">
+    <h2 id="offerTitle">Incoming files</h2>
+    <ul class="file-names" id="offerFiles"></ul>
+    <p class="hint" id="offerHint"></p>
+    <div class="row" style="margin-top:14px">
+      <button class="primary grow" id="offerAccept">Accept</button>
+      <button class="grow" id="offerDecline">Decline</button>
+    </div>
+  </div>
+</div>
+
+<!-- Incoming remote desktop request -->
+<div class="backdrop hidden" id="rrModal">
+  <div class="modal">
+    <h2 id="rrTitle">Remote desktop request</h2>
+    <p id="rrText"></p>
+    <p class="hint">Only allow people you trust. You'll see a red bar while it's running and can stop it at any time.</p>
+    <div class="row" style="margin-top:14px;flex-wrap:wrap">
+      <button class="primary grow" id="rrAllow">Allow control</button>
+      <button class="grow" id="rrView">View only</button>
+      <button class="danger grow" id="rrDeny">Deny</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast hidden" id="toast"><span id="toastText"></span><button class="small" id="toastBtn">Cancel</button></div>
+
+<!-- Remote screen viewer -->
+<div class="viewer hidden" id="viewer">
+  <div class="viewer-bar">
+    <b id="vTitle">Remote screen</b>
+    <span class="peer-sub" id="vStats"></span>
+    <span class="spacer"></span>
+    <span class="badge direct" id="vCtl">Control on</span>
+    <button class="small" id="vFull">Full screen</button>
+    <button class="small danger" id="vClose">Disconnect</button>
+  </div>
+  <div class="viewer-body" id="vBody"><canvas id="vCanvas" tabindex="0"></canvas><div class="viewer-wait" id="vWait">Connecting…</div></div>
+</div>
 
 <script>
 "use strict";
@@ -429,17 +539,18 @@ function renderPeers(st) {
     sub.className = "peer-sub";
     sub.textContent = p.ip;
     main.append(name, sub);
-    const files = document.createElement("button");
-    files.className = "small";
-    files.textContent = "Files";
-    files.title = "Open " + p.name + "'s shared folder";
-    files.onclick = () => api("/api/open", { ip: p.ip, kind: "web" }).catch((e) => alert(e.message));
-    const smb = document.createElement("button");
-    smb.className = "small";
-    smb.textContent = "\\\\" + p.ip;
-    smb.title = "Open Windows file sharing on " + p.name + "'s PC";
-    smb.onclick = () => api("/api/open", { ip: p.ip, kind: "smb" }).catch((e) => alert(e.message));
-    li.append(av, main, files, smb);
+    const mk = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.className = "small";
+      b.textContent = label;
+      b.title = title;
+      b.onclick = fn;
+      return b;
+    };
+    li.append(av, main,
+      mk("Files", "Browse the files " + p.name + " shares", () => openBrowser(p.ip, p.name)),
+      mk("Send file", "Send files to " + p.name, () => sendFiles(p.ip, p.name)),
+      mk("Remote", "Ask " + p.name + " to let you see and control their screen", () => requestRemote(p.ip, p.name)));
     return li;
   }));
 }
@@ -523,6 +634,9 @@ function render(st) {
   renderPeers(st);
   renderGames(st);
   voiceSync(st);
+  renderTransfers(st);
+  renderOffers(st);
+  renderRemote(st);
 
   const sh = st.share;
   if (!shareDirty && document.activeElement !== $("shareFolder")) {
@@ -896,6 +1010,441 @@ for (const [id, k] of [["pttTeam", "team"], ["pttAll", "all"]]) {
   es.onerror = () => { es.close(); setTimeout(connectEvents, 2000); };
 })();
 window.addEventListener("beforeunload", () => { if (V.on) leaveVoice(); });
+
+// ---------------------------------------------------------------------------
+// Files: browse a player's shared folder, send files, transfers.
+// ---------------------------------------------------------------------------
+function human(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i];
+}
+function fileIcon(name, dir) {
+  if (dir) return "📁";
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["w3x", "w3m", "w3g", "w3z"].includes(ext)) return "🗺️";
+  if (["zip", "rar", "7z", "gz", "tar"].includes(ext)) return "🗜️";
+  if (["png", "jpg", "jpeg", "gif", "bmp", "webp"].includes(ext)) return "🖼️";
+  if (["mp3", "wav", "ogg", "flac", "m4a"].includes(ext)) return "🎵";
+  if (["mp4", "mkv", "avi", "mov", "webm"].includes(ext)) return "🎬";
+  if (["exe", "msi", "bat"].includes(ext)) return "⚙️";
+  if (["txt", "doc", "docx", "pdf", "xls", "xlsx"].includes(ext)) return "📄";
+  return "📄";
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+const FB = { ip: "", name: "", path: "/", entries: [] };
+
+function openBrowser(ip, name) {
+  FB.ip = ip; FB.name = name;
+  $("fbTitle").textContent = name + "'s shared files";
+  $("fbSearch").value = "";
+  $("fbModal").classList.remove("hidden");
+  browse("/");
+}
+$("fbClose").onclick = () => $("fbModal").classList.add("hidden");
+$("fbModal").onclick = (e) => { if (e.target === $("fbModal")) $("fbModal").classList.add("hidden"); };
+$("fbSearch").oninput = () => renderBrowser();
+$("fbSmb").onclick = () => api("/api/open", { ip: FB.ip, kind: "smb" }).catch((e) => setMsg($("fbMsg"), "bad", e.message));
+$("fbAll").onclick = () => {
+  const files = visibleEntries().filter((e) => !e.dir);
+  files.forEach((e) => download(e));
+  if (files.length) toast("Downloading " + files.length + " file" + (files.length > 1 ? "s" : "") + "…");
+};
+
+async function browse(path) {
+  setMsg($("fbMsg"), "", "");
+  $("fbList").replaceChildren(el("div", "empty", "Loading…"));
+  try {
+    const l = await api("/api/files/list", { ip: FB.ip, path });
+    FB.path = l.path; FB.entries = l.entries || [];
+    $("fbSearch").value = "";
+    renderBrowser();
+  } catch (e) {
+    FB.entries = [];
+    $("fbList").replaceChildren(el("div", "empty", "Nothing to show."));
+    setMsg($("fbMsg"), "bad", e.message + (/not sharing/.test(e.message) ? " – ask them to pick a folder under “Share a folder”." : ""));
+  }
+}
+
+function visibleEntries() {
+  const q = $("fbSearch").value.trim().toLowerCase();
+  return FB.entries.filter((e) => !q || e.name.toLowerCase().includes(q));
+}
+
+function download(e) {
+  const p = (FB.path === "/" ? "" : FB.path) + "/" + e.name;
+  return api("/api/files/download", { ip: FB.ip, path: p, size: e.size }).then(refresh).catch((err) => setMsg($("fbMsg"), "bad", err.message));
+}
+
+function renderBrowser() {
+  // Breadcrumbs: Shared / Maps / Download
+  const crumbs = $("fbCrumbs");
+  const parts = FB.path.split("/").filter(Boolean);
+  const items = [];
+  const home = el("button", "small", "🏠 " + FB.name);
+  home.onclick = () => browse("/");
+  items.push(home);
+  parts.forEach((part, i) => {
+    items.push(el("span", "", "›"));
+    const b = el("button", "small", part);
+    b.onclick = () => browse("/" + parts.slice(0, i + 1).join("/"));
+    items.push(b);
+  });
+  crumbs.replaceChildren(...items);
+
+  const rows = [];
+  if (parts.length) {
+    const up = el("div", "fb-row dir");
+    up.append(el("div", "fb-icon", "⬆️"), el("div", "nm", "Back"), el("div", "sz", ""), el("div", "dt", ""), el("div", ""));
+    up.onclick = () => browse("/" + parts.slice(0, -1).join("/"));
+    rows.push(up);
+  }
+  for (const e of visibleEntries()) {
+    const row = el("div", "fb-row" + (e.dir ? " dir" : ""));
+    const act = el("div");
+    if (e.dir) {
+      row.onclick = () => browse((FB.path === "/" ? "" : FB.path) + "/" + e.name);
+      row.title = "Open folder";
+    } else {
+      const b = el("button", "small primary", "Download");
+      b.onclick = (ev) => { ev.stopPropagation(); download(e); b.textContent = "Added ✓"; b.disabled = true; };
+      act.append(b);
+      row.ondblclick = () => download(e);
+    }
+    row.append(el("div", "fb-icon", fileIcon(e.name, e.dir)), el("div", "nm", e.name),
+      el("div", "sz", e.dir ? "" : human(e.size)), el("div", "dt", new Date(e.modified * 1000).toLocaleString()), act);
+    rows.push(row);
+  }
+  if (!rows.length || (rows.length === 1 && parts.length)) rows.push(el("div", "empty", $("fbSearch").value ? "No matches." : "This folder is empty."));
+  $("fbList").replaceChildren(...rows);
+  $("fbAll").disabled = !visibleEntries().some((e) => !e.dir);
+}
+
+async function sendFiles(ip, name) {
+  try {
+    const r = await api("/api/files/pick", {});
+    if (!r.paths || !r.paths.length) return;
+    await api("/api/files/send", { ip, paths: r.paths });
+    toast("Waiting for " + name + " to accept " + r.paths.length + " file" + (r.paths.length > 1 ? "s" : "") + "…");
+    refresh();
+  } catch (e) { alert(e.message); }
+}
+
+const stateText = {
+  waiting: "waiting for them to accept", accepted: "starting…", active: "", done: "done",
+  failed: "failed", declined: "declined", cancelled: "cancelled",
+};
+function renderTransfers(st) {
+  $("dlDir").textContent = st.downloadDir || "Downloads\\BOKALBS VPN";
+  const list = st.transfers || [];
+  $("noTransfers").classList.toggle("hidden", list.length > 0);
+  $("transfers").replaceChildren(...list.map((t) => {
+    const li = el("li");
+    const main = el("div", "peer-main");
+    const name = el("div", "peer-name", (t.incoming ? "⬇ " : "⬆ ") + t.name);
+    const pct = t.size ? Math.min(100, Math.floor(t.done * 100 / t.size)) : (t.state === "done" ? 100 : 0);
+    let sub = (t.incoming ? "from " : "to ") + t.peerName + " · " + (t.size ? human(t.size) : "");
+    if (t.state === "active") sub += " · " + pct + "%" + (t.speed ? " · " + human(t.speed) + "/s" : "");
+    else sub += " · " + (stateText[t.state] || t.state) + (t.error ? ": " + t.error : "");
+    const bar = el("div", "progress" + (t.state === "done" ? " done" : ["failed", "declined", "cancelled"].includes(t.state) ? " bad" : ""));
+    const fill = el("div");
+    fill.style.width = (t.state === "done" ? 100 : pct) + "%";
+    bar.append(fill);
+    main.append(name, el("div", "peer-sub", sub), bar);
+    li.append(main);
+    if (t.state === "done" && t.incoming) {
+      const o = el("button", "small", "Open");
+      o.onclick = () => api("/api/files/open", { id: t.id }).catch((e) => alert(e.message));
+      const f = el("button", "small", "Show in folder");
+      f.onclick = () => api("/api/files/open", { id: t.id, reveal: true }).catch((e) => alert(e.message));
+      li.append(o, f);
+    } else if (["active", "waiting", "accepted"].includes(t.state)) {
+      const c = el("button", "small", "Cancel");
+      c.onclick = () => api("/api/files/cancel", { id: t.id }).then(refresh);
+      li.append(c);
+    }
+    return li;
+  }));
+}
+$("openDownloads").onclick = () => api("/api/files/open", { folder: true }).catch((e) => alert(e.message));
+$("clearTransfers").onclick = () => api("/api/files/clear", {}).then(refresh);
+
+// Incoming file offers, one dialog at a time.
+let shownOffer = null;
+function renderOffers(st) {
+  const offers = st.fileOffers || [];
+  const o = offers[0];
+  if (!o) { $("offerModal").classList.add("hidden"); shownOffer = null; return; }
+  if (shownOffer === o.from + o.id) return;
+  shownOffer = o.from + o.id;
+  const total = o.files.reduce((a, f) => a + f.size, 0);
+  $("offerTitle").textContent = o.fromName + " wants to send you " + o.files.length + " file" + (o.files.length > 1 ? "s" : "");
+  $("offerFiles").replaceChildren(...o.files.slice(0, 50).map((f) => el("li", "", f.name + " (" + human(f.size) + ")")));
+  $("offerHint").textContent = "Total " + human(total) + ". Files are saved in " + (st.downloadDir || "Downloads") + ".";
+  $("offerModal").classList.remove("hidden");
+  const answer = (accept) => {
+    $("offerModal").classList.add("hidden");
+    api("/api/files/answer", { from: o.from, id: o.id, accept }).then(refresh).catch((e) => alert(e.message));
+  };
+  $("offerAccept").onclick = () => answer(true);
+  $("offerDecline").onclick = () => answer(false);
+  chime();
+}
+
+// ---------------------------------------------------------------------------
+// Remote desktop.
+// ---------------------------------------------------------------------------
+function chime() {
+  try {
+    const ctx = new AudioContext();
+    [660, 880].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.05, ctx.currentTime + i * 0.15);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + i * 0.15 + 0.14);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + i * 0.15); o.stop(ctx.currentTime + i * 0.15 + 0.15);
+    });
+    setTimeout(() => ctx.close(), 600);
+  } catch (e) { /* no audio */ }
+}
+
+let toastTimer = 0;
+function toast(text, btn, onBtn, sticky) {
+  $("toastText").textContent = text;
+  $("toastBtn").classList.toggle("hidden", !btn);
+  $("toastBtn").textContent = btn || "";
+  $("toastBtn").onclick = () => { hideToast(); if (onBtn) onBtn(); };
+  $("toast").classList.remove("hidden");
+  clearTimeout(toastTimer);
+  if (!sticky) toastTimer = setTimeout(hideToast, 5000);
+}
+function hideToast() { $("toast").classList.add("hidden"); }
+
+async function requestRemote(ip, name) {
+  try {
+    const r = await api("/api/remote/request", { ip, control: true });
+    toast("Asking " + name + " to share their screen…", "Cancel", () => api("/api/remote/stop", { id: r.id }), true);
+    refresh();
+  } catch (e) { alert(e.message); }
+}
+
+const RV = { id: "", seen: {}, reader: null, inputQ: [], sending: false, keys: new Set(), w: 0, h: 0 };
+
+function renderRemote(st) {
+  const sessions = st.remote || [];
+  // Requests to see this PC.
+  const ask = sessions.find((s) => s.incoming && s.state === "asking");
+  if (ask && RV.seen[ask.id] !== "dialog") {
+    RV.seen[ask.id] = "dialog";
+    $("rrTitle").textContent = ask.peerName + " wants to " + (ask.control ? "see and control" : "see") + " your screen";
+    $("rrText").textContent = ask.control
+      ? "With “Allow control” " + ask.peerName + " can move your mouse and type on this PC. “View only” lets them watch without touching anything."
+      : ask.peerName + " will see everything on your screen.";
+    $("rrAllow").classList.toggle("hidden", !ask.control);
+    const answer = (allow, control) => {
+      $("rrModal").classList.add("hidden");
+      api("/api/remote/answer", { id: ask.id, allow, control }).then(refresh).catch((e) => alert(e.message));
+    };
+    $("rrAllow").onclick = () => answer(true, true);
+    $("rrView").onclick = () => answer(true, false);
+    $("rrDeny").onclick = () => answer(false, false);
+    $("rrModal").classList.remove("hidden");
+    chime();
+  }
+  if (!ask) $("rrModal").classList.add("hidden");
+
+  // Someone is watching this PC: red bar with Stop.
+  const active = sessions.find((s) => s.incoming && s.state === "active");
+  $("rcBanner").classList.toggle("hidden", !active);
+  document.body.style.paddingTop = active ? "40px" : "";
+  if (active) {
+    $("rcBannerText").textContent = "🔴 " + active.peerName + (active.control ? " can see and control this PC" : " can see this screen");
+    $("rcBannerStop").onclick = () => api("/api/remote/stop", { id: active.id }).then(refresh);
+  }
+
+  // My requests to see another PC.
+  for (const s of sessions.filter((x) => !x.incoming)) {
+    const prev = RV.seen[s.id];
+    if (prev === s.state) continue;
+    RV.seen[s.id] = s.state;
+    if (s.state === "active" && RV.id !== s.id) { hideToast(); openViewer(s); }
+    if (s.state === "declined") toast(s.peerName + " declined the request.");
+    if (s.state === "ended" && RV.id === s.id) { closeViewer(false); toast("The remote session ended."); }
+  }
+}
+
+// --- viewer ---
+const VK = {
+  Enter: 13, NumpadEnter: 13, Escape: 27, Backspace: 8, Tab: 9, Space: 32, CapsLock: 20,
+  ShiftLeft: 0xA0, ShiftRight: 0xA1, ControlLeft: 0xA2, ControlRight: 0xA3, AltLeft: 0xA4, AltRight: 0xA5,
+  MetaLeft: 0x5B, MetaRight: 0x5C, ContextMenu: 93, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+  Insert: 45, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34, PrintScreen: 44, ScrollLock: 145,
+  Pause: 19, NumLock: 144, NumpadMultiply: 106, NumpadAdd: 107, NumpadSubtract: 109, NumpadDecimal: 110,
+  NumpadDivide: 111, Minus: 189, Equal: 187, BracketLeft: 219, BracketRight: 221, Backslash: 220,
+  Semicolon: 186, Quote: 222, Backquote: 192, Comma: 188, Period: 190, Slash: 191, IntlBackslash: 226,
+};
+function vkOf(code) {
+  if (VK[code]) return VK[code];
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(code))) return m[1].charCodeAt(0);
+  if ((m = /^Digit(\d)$/.exec(code))) return 48 + +m[1];
+  if ((m = /^Numpad(\d)$/.exec(code))) return 96 + +m[1];
+  if ((m = /^F(\d{1,2})$/.exec(code))) return 111 + +m[1];
+  return 0;
+}
+
+function sendInput(ev) {
+  if (!RV.control) return;
+  const last = RV.inputQ[RV.inputQ.length - 1];
+  if (ev.t === "move" && last && last.t === "move") RV.inputQ[RV.inputQ.length - 1] = ev; // keep only the latest position
+  else RV.inputQ.push(ev);
+  pumpInput();
+}
+async function pumpInput() {
+  if (RV.sending || !RV.inputQ.length || !RV.id) return;
+  RV.sending = true;
+  const events = RV.inputQ.splice(0);
+  try { await api("/api/remote/input", { id: RV.id, events }); } catch (e) { /* session ending */ }
+  RV.sending = false;
+  if (RV.inputQ.length) setTimeout(pumpInput, 15);
+}
+
+function pos(e) {
+  const r = $("vCanvas").getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+const cv = $("vCanvas");
+cv.onmousemove = (e) => sendInput({ t: "move", ...pos(e) });
+cv.onmousedown = (e) => { cv.focus(); e.preventDefault(); sendInput({ t: "down", b: e.button, ...pos(e) }); };
+cv.onmouseup = (e) => { e.preventDefault(); sendInput({ t: "up", b: e.button, ...pos(e) }); };
+cv.oncontextmenu = (e) => e.preventDefault();
+cv.onwheel = (e) => { e.preventDefault(); sendInput({ t: "wheel", d: e.deltaY < 0 ? 120 : -120 }); };
+cv.onkeydown = (e) => {
+  const k = vkOf(e.code);
+  if (!k) return;
+  e.preventDefault();
+  RV.keys.add(k);
+  sendInput({ t: "key", k });
+};
+cv.onkeyup = (e) => {
+  const k = vkOf(e.code);
+  if (!k) return;
+  e.preventDefault();
+  RV.keys.delete(k);
+  sendInput({ t: "key", k, up: true });
+};
+cv.onblur = () => { for (const k of RV.keys) sendInput({ t: "key", k, up: true }); RV.keys.clear(); };
+
+function fitCanvas() {
+  if (!RV.w) return;
+  const body = $("vBody");
+  const s = Math.min(body.clientWidth / RV.w, body.clientHeight / RV.h);
+  cv.style.width = Math.floor(RV.w * s) + "px";
+  cv.style.height = Math.floor(RV.h * s) + "px";
+}
+window.addEventListener("resize", fitCanvas);
+
+function openViewer(s) {
+  RV.id = s.id; RV.control = s.control; RV.w = RV.h = 0;
+  $("vTitle").textContent = s.peerName + "'s screen";
+  $("vCtl").textContent = s.control ? "You can control it – click inside" : "View only";
+  $("vCtl").className = "badge " + (s.control ? "direct" : "relay");
+  $("vWait").classList.remove("hidden");
+  $("viewer").classList.remove("hidden");
+  runStream(s.id);
+}
+
+function closeViewer(tellOther) {
+  const id = RV.id;
+  RV.id = "";
+  if (RV.reader) { RV.reader.cancel().catch(() => {}); RV.reader = null; }
+  $("viewer").classList.add("hidden");
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  if (tellOther && id) api("/api/remote/stop", { id }).then(refresh);
+}
+$("vClose").onclick = () => closeViewer(true);
+$("vFull").onclick = () => ($("viewer").requestFullscreen ? $("viewer").requestFullscreen() : null);
+
+async function runStream(id) {
+  const g = cv.getContext("2d");
+  let chunks = [], have = 0, frames = 0, bytes = 0, t0 = performance.now();
+  try {
+    const resp = await fetch("/api/remote/stream?id=" + encodeURIComponent(id) + "&t=" + encodeURIComponent(token));
+    if (!resp.ok) throw new Error(await resp.text());
+    const reader = resp.body.getReader();
+    RV.reader = reader;
+    const need = async (n) => {
+      while (have < n) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("ended");
+        chunks.push(value); have += value.length; bytes += value.length;
+      }
+    };
+    const take = (n) => {
+      const out = new Uint8Array(n);
+      let o = 0;
+      while (o < n) {
+        const c = chunks[0], k = Math.min(c.length, n - o);
+        out.set(c.subarray(0, k), o); o += k;
+        if (k === c.length) chunks.shift(); else chunks[0] = c.subarray(k);
+      }
+      have -= n;
+      return out;
+    };
+    while (RV.id === id) {
+      await need(1);
+      const typ = take(1)[0];
+      if (typ === 83) { // 'S' screen size
+        await need(4);
+        const b = take(4);
+        RV.w = (b[0] << 8) | b[1]; RV.h = (b[2] << 8) | b[3];
+        cv.width = RV.w; cv.height = RV.h;
+        fitCanvas();
+        $("vWait").classList.add("hidden");
+      } else if (typ === 84) { // 'T' tile
+        await need(12);
+        const h = take(12);
+        const dv = new DataView(h.buffer);
+        const x = dv.getUint16(0), y = dv.getUint16(2), len = dv.getUint32(8);
+        await need(len);
+        const bmp = await createImageBitmap(new Blob([take(len)], { type: "image/jpeg" }));
+        g.drawImage(bmp, x, y);
+        bmp.close();
+      } else if (typ === 70) { // 'F' frame done
+        frames++;
+        const dt = (performance.now() - t0) / 1000;
+        if (dt > 1) {
+          $("vStats").textContent = Math.round(frames / dt) + " fps · " + human(bytes / dt) + "/s";
+          frames = 0; bytes = 0; t0 = performance.now();
+        }
+      } else {
+        throw new Error("bad stream");
+      }
+    }
+  } catch (e) {
+    if (RV.id === id) { closeViewer(false); toast("Remote screen disconnected" + (e.message && e.message !== "ended" ? ": " + e.message : ".")); }
+  }
+}
+
+// React at once to events instead of waiting for the next refresh.
+(function remoteEvents() {
+  const es = new EventSource("/api/voice/events?t=" + encodeURIComponent(token));
+  es.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch (err) { return; }
+    if (["file-offer", "remote-request", "remote-answer", "remote-ended"].includes(ev.kind)) refresh();
+  };
+  es.onerror = () => { es.close(); setTimeout(remoteEvents, 2000); };
+})();
 
 async function refresh() {
   try { render(await api("/api/state")); } catch (e) { /* app closing */ }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/codered141218/bokalbs-vpn/internal/peer"
 	"golang.org/x/sys/windows"
 )
 
@@ -20,7 +21,8 @@ func down(vk uint16) bool {
 // WatchKeys polls the push-to-talk keys (named by Keys IDs) every 15 ms and
 // reports changes to the hub, whichever window has focus. keys returns the
 // current choice (team key, everyone key).
-func (h *Hub) WatchKeys(ctx context.Context, keys func() (team, all string)) {
+func WatchKeys(ctx context.Context, h *peer.Hub, keys func() (team, all string)) {
+	var st keyState
 	t := time.NewTicker(15 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -29,7 +31,7 @@ func (h *Hub) WatchKeys(ctx context.Context, keys func() (team, all string)) {
 			return
 		case <-t.C:
 			teamID, allID := keys()
-			h.SetKeys(down(keyCode(teamID)), down(keyCode(allID)))
+			st.set(h, down(keyCode(teamID)), down(keyCode(allID)))
 		}
 	}
 }

@@ -26,3 +26,5 @@ func showWindow(u *ui.UI) {
 }
 
 func fatal(text string) { fmt.Fprintln(os.Stderr, text) }
+
+func attention() {}
