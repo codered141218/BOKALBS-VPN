@@ -82,6 +82,17 @@ details ol, details ul { padding-left: 20px; margin: 8px 0; }
 details li { margin: 4px 0; }
 pre.log { max-height: 240px; overflow: auto; background: var(--panel-2); border-radius: 8px; padding: 10px; font: 12px/1.45 Consolas, ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0 0; }
 .hidden { display: none !important; }
+select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font: inherit; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 12px; }
+@media (max-width: 480px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+.talk { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--panel-2); color: var(--muted); font-weight: 600; text-align: center; }
+.talk.team { background: var(--ok-soft); color: var(--ok); }
+.talk.all { background: var(--warn-soft); color: var(--warn); }
+.meter { height: 4px; border-radius: 2px; background: var(--panel-2); margin-top: 6px; overflow: hidden; }
+.meter div { height: 100%; width: 0; background: var(--ok); transition: width .1s linear; }
+.speaking .avatar { box-shadow: 0 0 0 3px var(--ok); }
+input[type=range] { width: 90px; accent-color: var(--accent); }
+button.on { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 a { color: var(--accent); }
 </style>
 </head>
@@ -170,6 +181,43 @@ a { color: var(--accent); }
       <div class="peer-sub" style="font-weight:600">Warcraft III games on the network</div>
       <ul class="peers" id="games"></ul>
     </div>
+  </section>
+
+  <!-- Voice chat -->
+  <section class="card" id="voiceCard">
+    <h2>Voice chat <span class="pill" id="voicePill">Off</span></h2>
+    <p class="hint" style="margin-top:0">Talk to your team or to everyone while you play. Audio only, about 24 kbit/s per speaker and nothing during silence, so it doesn't slow the game.</p>
+    <div class="row" style="margin-top:10px">
+      <button class="primary grow" id="voiceJoin">Join voice chat</button>
+    </div>
+    <div class="talk" id="talkState">Not talking</div>
+    <div class="meter"><div id="micLevel"></div></div>
+    <div class="grid2">
+      <div>
+        <label for="vTeam">My team</label>
+        <select id="vTeam"><option value="1">Team 1</option><option value="2">Team 2</option><option value="3">Team 3</option><option value="4">Team 4</option></select>
+      </div>
+      <div>
+        <label for="vMode">Microphone</label>
+        <select id="vMode"><option value="ptt">Push to talk</option><option value="open">Always on (to my team)</option></select>
+      </div>
+      <div>
+        <label for="vTeamKey">Hold to talk to team</label>
+        <select id="vTeamKey"></select>
+      </div>
+      <div>
+        <label for="vAllKey">Hold to talk to everyone</label>
+        <select id="vAllKey"></select>
+      </div>
+    </div>
+    <p class="hint">The keys work while the game is in front. Teammates are the players who picked the same team here; everyone else only hears you when you hold the "everyone" key.</p>
+    <div class="row" style="margin-top:8px;flex-wrap:wrap">
+      <button class="small" id="vMute">Mute my mic</button>
+      <button class="small" id="pttTeam" title="Hold with the mouse to talk to your team">Hold: team</button>
+      <button class="small" id="pttAll" title="Hold with the mouse to talk to everyone">Hold: everyone</button>
+    </div>
+    <div class="msg bad" id="voiceMsg"></div>
+    <ul class="peers" id="voicePeers" style="margin-top:8px"></ul>
   </section>
 
   <!-- Share -->
@@ -474,6 +522,7 @@ function render(st) {
   }
   renderPeers(st);
   renderGames(st);
+  voiceSync(st);
 
   const sh = st.share;
   if (!shareDirty && document.activeElement !== $("shareFolder")) {
@@ -490,6 +539,363 @@ function render(st) {
   log.textContent = st.logs.join("\n");
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
+
+// ---------------------------------------------------------------------------
+// Voice chat. Audio goes directly between players over the VPN with WebRTC
+// (Opus, echo cancellation, noise suppression). The app only relays the
+// small setup messages (offer/answer with network candidates) between
+// players' apps, and reports push-to-talk keys pressed anywhere.
+// ---------------------------------------------------------------------------
+const V = {
+  on: false, stream: null, ctx: null, analyser: null,
+  peers: new Map(), // ip -> {ip, name, team, voice, pc, track, audio, muted, vol, speaking, state}
+  keys: { team: false, all: false }, ui: { team: false, all: false },
+  micMuted: false, target: null, myIP: "", subnet: "", settings: {}, listKey: "",
+};
+const OPUS_KBPS = 24;
+
+function ipNum(ip) { return ip.split(".").reduce((a, b) => a * 256 + (+b), 0); }
+function inSubnet(ip) {
+  if (!V.subnet || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return false;
+  const [net, bits] = V.subnet.split("/");
+  const mask = +bits === 0 ? 0 : (0xffffffff << (32 - +bits)) >>> 0;
+  return ((ipNum(ip) & mask) >>> 0) === ((ipNum(net) & mask) >>> 0);
+}
+function vsend(to, msg) { return api("/api/voice/send", { to, msg }).catch(() => {}); }
+function hello(to, reply) {
+  vsend(to, { t: "hello", team: V.settings.voiceTeam || 1, voice: V.on, reply: !!reply });
+}
+function voicePeer(ip) {
+  let vp = V.peers.get(ip);
+  if (!vp) {
+    vp = { ip, name: ip, team: 0, voice: false, muted: false, vol: 1, speaking: false, state: "" };
+    V.peers.set(ip, vp);
+  }
+  return vp;
+}
+
+// Keep only network candidates on the VPN, so voice never leaks onto the
+// internet or the home network, and limit Opus to a light voice bitrate.
+function prepareSDP(sdp) {
+  const lines = sdp.split("\r\n");
+  const vpn = lines.filter((l) => l.startsWith("a=candidate:") && inSubnet(l.split(" ")[4]));
+  const keepAll = vpn.length === 0; // e.g. mDNS names: let WebRTC try them
+  const opus = (sdp.match(/a=rtpmap:(\d+) opus\/48000/i) || [])[1];
+  return lines.filter((l) => !l.startsWith("a=candidate:") || keepAll || inSubnet(l.split(" ")[4]))
+    .map((l) => opus && l.startsWith("a=fmtp:" + opus + " ")
+      ? l.replace(/;?(maxaveragebitrate|usedtx|useinbandfec|stereo)=\d+/g, "") +
+        ";maxaveragebitrate=" + OPUS_KBPS * 1000 + ";usedtx=1;useinbandfec=1;stereo=0"
+      : l)
+    .join("\r\n");
+}
+
+function gathered(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((res) => {
+    const done = () => { if (pc.iceGatheringState === "complete") res(); };
+    pc.addEventListener("icegatheringstatechange", done);
+    setTimeout(res, 2500);
+  });
+}
+
+function closePeer(vp) {
+  if (vp.pc) { try { vp.pc.close(); } catch (e) { /* closed */ } }
+  if (vp.track) vp.track.stop();
+  if (vp.audio) { vp.audio.srcObject = null; }
+  vp.pc = vp.track = vp.audio = null;
+  vp.state = ""; vp.speaking = false;
+}
+
+function newPC(vp) {
+  closePeer(vp);
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const track = V.stream.getAudioTracks()[0].clone();
+  track.enabled = false;
+  const sender = pc.addTrack(track, new MediaStream([track]));
+  pc.ontrack = (e) => {
+    const a = new Audio();
+    a.autoplay = true;
+    a.srcObject = e.streams[0] || new MediaStream([e.track]);
+    a.volume = vp.vol; a.muted = vp.muted;
+    vp.audio = a;
+    a.play().catch(() => {});
+  };
+  pc.onconnectionstatechange = () => {
+    vp.state = pc.connectionState;
+    if (pc.connectionState === "connected") {
+      const p = sender.getParameters();
+      if (p.encodings && p.encodings[0]) {
+        p.encodings[0].maxBitrate = OPUS_KBPS * 1000;
+        sender.setParameters(p).catch(() => {});
+      }
+    }
+    if (pc.connectionState === "failed" && vp.pc === pc) {
+      closePeer(vp);
+      if (V.on && ipNum(V.myIP) < ipNum(vp.ip)) setTimeout(() => { if (V.on && vp.voice && !vp.pc) makeOffer(vp); }, 3000);
+    }
+    renderVoice();
+  };
+  vp.pc = pc; vp.track = track; vp.state = "connecting";
+  updateRouting();
+  return pc;
+}
+
+async function makeOffer(vp) {
+  const pc = newPC(vp);
+  await pc.setLocalDescription(await pc.createOffer());
+  await gathered(pc);
+  if (vp.pc !== pc) return;
+  vsend(vp.ip, { t: "offer", sdp: prepareSDP(pc.localDescription.sdp) });
+}
+
+async function onSignal(from, m) {
+  if (!m || typeof m !== "object") return;
+  const vp = voicePeer(from);
+  try {
+    switch (m.t) {
+      case "hello":
+        vp.team = m.team | 0; vp.voice = !!m.voice;
+        if (V.on && !m.reply) hello(from, true);
+        if (!vp.voice) closePeer(vp);
+        // The lower address starts the call, so both never call at once.
+        else if (V.on && !vp.pc && ipNum(V.myIP) < ipNum(from)) await makeOffer(vp);
+        break;
+      case "bye":
+        vp.voice = false; closePeer(vp);
+        break;
+      case "offer": {
+        if (!V.on) { hello(from, true); break; }
+        vp.voice = true;
+        const pc = newPC(vp);
+        await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+        await pc.setLocalDescription(await pc.createAnswer());
+        await gathered(pc);
+        if (vp.pc === pc) vsend(from, { t: "answer", sdp: prepareSDP(pc.localDescription.sdp) });
+        break;
+      }
+      case "answer":
+        if (vp.pc && vp.pc.signalingState === "have-local-offer") await vp.pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
+        break;
+    }
+  } catch (e) {
+    console.warn("voice", e);
+  }
+  updateRouting();
+  renderVoice();
+}
+
+// Who hears me right now: nobody, my team, or everyone.
+function talkTarget() {
+  if (!V.on || V.micMuted) return null;
+  if (V.keys.all || V.ui.all) return "all";
+  if (V.settings.voiceMode === "open") return "team";
+  return V.keys.team || V.ui.team ? "team" : null;
+}
+
+function beep(up) {
+  if (!V.ctx) return;
+  const o = V.ctx.createOscillator(), g = V.ctx.createGain();
+  o.frequency.value = up ? 880 : 560;
+  g.gain.setValueAtTime(0.04, V.ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, V.ctx.currentTime + 0.08);
+  o.connect(g).connect(V.ctx.destination);
+  o.start(); o.stop(V.ctx.currentTime + 0.09);
+}
+
+function updateRouting() {
+  const t = talkTarget();
+  const myTeam = V.settings.voiceTeam || 1;
+  for (const vp of V.peers.values()) {
+    if (vp.track) vp.track.enabled = t === "all" || (t === "team" && vp.team === myTeam);
+  }
+  if (t !== V.target) {
+    if (V.settings.voiceMode !== "open" || t === "all" || V.target === "all") beep(!!t);
+    V.target = t;
+  }
+  const el = $("talkState");
+  const mates = [...V.peers.values()].filter((p) => p.voice && p.team === myTeam).length;
+  el.className = "talk" + (t ? " " + t : "");
+  el.textContent = !V.on ? "Voice chat is off"
+    : V.micMuted ? "Microphone muted"
+    : t === "all" ? "Talking to everyone"
+    : t === "team" ? "Talking to Team " + myTeam + (mates ? "" : " (no teammates in voice yet)")
+    : "Not talking – hold your key to talk";
+}
+
+async function joinVoice() {
+  setMsg($("voiceMsg"), "", "");
+  try {
+    V.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+  } catch (e) {
+    setMsg($("voiceMsg"), "bad", "Cannot use the microphone (" + e.message + "). Allow microphone access for BOKALBS VPN and check Windows Settings → Privacy → Microphone.");
+    return;
+  }
+  try {
+    V.ctx = new AudioContext();
+    V.analyser = V.ctx.createAnalyser();
+    V.analyser.fftSize = 256;
+    V.ctx.createMediaStreamSource(V.stream).connect(V.analyser);
+  } catch (e) { V.ctx = null; }
+  V.on = true;
+  for (const vp of V.peers.values()) hello(vp.ip);
+  updateRouting();
+  renderVoice();
+}
+
+function leaveVoice() {
+  V.on = false;
+  for (const vp of V.peers.values()) {
+    if (vp.voice || vp.pc) vsend(vp.ip, { t: "bye" });
+    closePeer(vp);
+  }
+  if (V.stream) V.stream.getTracks().forEach((t) => t.stop());
+  if (V.ctx) V.ctx.close().catch(() => {});
+  V.stream = V.ctx = V.analyser = null;
+  updateRouting();
+  renderVoice();
+}
+
+// Called with every app state refresh.
+function voiceSync(st) {
+  const c = st.client || {};
+  V.myIP = st.running ? c.ip || "" : "";
+  V.subnet = st.running ? c.subnet || "" : "";
+  const teamChanged = V.settings.voiceTeam !== undefined && V.settings.voiceTeam !== st.settings.voiceTeam;
+  V.settings = st.settings;
+  if (!V.listKey) {
+    for (const id of ["vTeamKey", "vAllKey"]) {
+      $(id).replaceChildren(...st.voiceKeys.map((k) => new Option(k.name, k.id)));
+    }
+    V.listKey = "x";
+  }
+  if (document.activeElement && !document.activeElement.closest("#voiceCard select")) {
+    $("vTeam").value = String(st.settings.voiceTeam);
+    $("vMode").value = st.settings.voiceMode;
+    $("vTeamKey").value = st.settings.voiceTeamKey;
+    $("vAllKey").value = st.settings.voiceAllKey;
+  }
+  const live = new Set();
+  for (const p of (st.running && c.peers) || []) {
+    live.add(p.ip);
+    const isNew = !V.peers.has(p.ip);
+    const vp = voicePeer(p.ip);
+    vp.name = p.name;
+    if (isNew && V.on) hello(p.ip);
+  }
+  for (const [ip, vp] of V.peers) if (!live.has(ip)) { closePeer(vp); V.peers.delete(ip); }
+  if (V.on && !V.myIP) leaveVoice();
+  if (teamChanged && V.on) for (const vp of V.peers.values()) hello(vp.ip, true);
+  if (st.voiceError) setMsg($("voiceMsg"), "bad", st.voiceError);
+  $("voiceJoin").disabled = !V.on && !V.myIP;
+  updateRouting();
+  renderVoice();
+}
+
+function renderVoice() {
+  $("voiceJoin").textContent = V.on ? "Leave voice chat" : "Join voice chat";
+  $("voiceJoin").className = V.on ? "danger grow" : "primary grow";
+  const pill = $("voicePill");
+  pill.textContent = V.on ? "On" : "Off";
+  pill.className = "pill" + (V.on ? " ok" : "");
+  $("vMute").textContent = V.micMuted ? "Unmute my mic" : "Mute my mic";
+  $("vMute").classList.toggle("on", V.micMuted);
+  const myTeam = V.settings.voiceTeam || 1;
+  const list = [...V.peers.values()].filter((p) => p.name !== p.ip || p.voice);
+  const key = list.map((p) => p.ip + p.voice + p.team + p.state + p.muted + p.name).join("|") + V.on;
+  const ul = $("voicePeers");
+  if (ul.dataset.key === key) { // only the speaking rings change: no re-render while dragging sliders
+    for (const li of ul.children) li.classList.toggle("speaking", !!(V.peers.get(li.dataset.ip) || {}).speaking);
+    return;
+  }
+  ul.dataset.key = key;
+  ul.replaceChildren(...list.map((vp) => {
+    const li = document.createElement("li");
+    li.dataset.ip = vp.ip;
+    li.classList.toggle("speaking", vp.speaking);
+    const av = document.createElement("div");
+    av.className = "avatar";
+    av.style.background = colorFor(vp.name);
+    av.textContent = (vp.name[0] || "?").toUpperCase();
+    const main = document.createElement("div");
+    main.className = "peer-main";
+    const name = document.createElement("div");
+    name.className = "peer-name";
+    name.textContent = vp.name + " ";
+    const badge = document.createElement("span");
+    const mate = vp.team === myTeam;
+    badge.className = "badge " + (mate ? "direct" : "relay");
+    badge.textContent = vp.voice ? "Team " + vp.team + (mate ? " · teammate" : " · other team") : "not in voice";
+    name.appendChild(badge);
+    const sub = document.createElement("div");
+    sub.className = "peer-sub";
+    sub.textContent = !vp.voice ? vp.ip : !V.on ? "in voice chat" : vp.state === "connected" ? "voice connected" : "connecting voice…";
+    main.append(name, sub);
+    li.append(av, main);
+    if (vp.voice && V.on) {
+      const vol = document.createElement("input");
+      vol.type = "range"; vol.min = "0"; vol.max = "1"; vol.step = "0.05"; vol.value = String(vp.vol);
+      vol.title = "Volume of " + vp.name;
+      vol.oninput = () => { vp.vol = +vol.value; if (vp.audio) vp.audio.volume = vp.vol; };
+      const mute = document.createElement("button");
+      mute.className = "small" + (vp.muted ? " on" : "");
+      mute.textContent = vp.muted ? "Unmute" : "Mute";
+      mute.onclick = () => { vp.muted = !vp.muted; if (vp.audio) vp.audio.muted = vp.muted; renderVoice(); };
+      li.append(vol, mute);
+    }
+    return li;
+  }));
+}
+
+// Speaking rings and my microphone level.
+setInterval(() => {
+  if (!V.on) { $("micLevel").style.width = "0"; return; }
+  const now = performance.now();
+  for (const vp of V.peers.values()) {
+    let s = false;
+    const r = vp.pc && vp.pc.getReceivers()[0];
+    const src = r && r.getSynchronizationSources ? r.getSynchronizationSources()[0] : null;
+    if (src && now - src.timestamp < 600) s = (src.audioLevel || 0) > 0.03 && !vp.muted;
+    vp.speaking = s;
+  }
+  if (V.analyser) {
+    const buf = new Uint8Array(V.analyser.fftSize);
+    V.analyser.getByteTimeDomainData(buf);
+    let peak = 0;
+    for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+    $("micLevel").style.width = (V.target ? Math.min(100, peak / 0.9) : 0) + "%";
+  }
+  renderVoice();
+}, 300);
+
+function saveVoice() {
+  api("/api/voice/settings", {
+    team: +$("vTeam").value, mode: $("vMode").value, teamKey: $("vTeamKey").value, allKey: $("vAllKey").value,
+  }).then(refresh).catch((e) => setMsg($("voiceMsg"), "bad", e.message));
+}
+for (const id of ["vTeam", "vMode", "vTeamKey", "vAllKey"]) $(id).onchange = saveVoice;
+$("voiceJoin").onclick = () => (V.on ? leaveVoice() : joinVoice());
+$("vMute").onclick = () => { V.micMuted = !V.micMuted; updateRouting(); renderVoice(); };
+for (const [id, k] of [["pttTeam", "team"], ["pttAll", "all"]]) {
+  const b = $(id);
+  const set = (v) => { V.ui[k] = v; b.classList.toggle("on", v); updateRouting(); };
+  b.onpointerdown = (e) => { b.setPointerCapture(e.pointerId); set(true); };
+  b.onpointerup = b.onpointercancel = () => set(false);
+}
+
+// Setup messages and push-to-talk keys from the app.
+(function connectEvents() {
+  const es = new EventSource("/api/voice/events?t=" + encodeURIComponent(token));
+  es.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch (err) { return; }
+    if (ev.kind === "keys") { V.keys = { team: !!ev.team, all: !!ev.all }; updateRouting(); }
+    else if (ev.kind === "signal") onSignal(ev.from, ev.msg);
+  };
+  es.onerror = () => { es.close(); setTimeout(connectEvents, 2000); };
+})();
+window.addEventListener("beforeunload", () => { if (V.on) leaveVoice(); });
 
 async function refresh() {
   try { render(await api("/api/state")); } catch (e) { /* app closing */ }

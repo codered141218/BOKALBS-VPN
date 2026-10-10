@@ -26,6 +26,7 @@ import (
 	"github.com/codered141218/bokalbs-vpn/internal/share"
 	"github.com/codered141218/bokalbs-vpn/internal/stun"
 	"github.com/codered141218/bokalbs-vpn/internal/tunnel"
+	"github.com/codered141218/bokalbs-vpn/internal/voice"
 )
 
 // Hosting describes the server running on this PC.
@@ -58,6 +59,9 @@ type State struct {
 	Hosting  *Hosting        `json:"hosting,omitempty"`
 	Share    ShareState      `json:"share"`
 	Logs     []string        `json:"logs"`
+
+	VoiceKeys  []voice.Key `json:"voiceKeys"`            // selectable push-to-talk keys
+	VoiceError string      `json:"voiceError,omitempty"` // voice chat could not start
 }
 
 // App is the application state machine.
@@ -81,6 +85,11 @@ type App struct {
 	logs     []string
 	logFile  io.Writer
 	gen      int
+
+	// Voice is the voice chat hub (setup messages and push-to-talk keys).
+	Voice    *voice.Hub
+	voiceIP  netip.Addr
+	voiceErr string
 }
 
 // New creates the app and loads saved settings.
@@ -91,6 +100,12 @@ func New(version string) *App {
 			a.logFile = f
 		}
 	}
+	a.Voice = voice.NewHub(a.IsMemberIP)
+	go a.Voice.WatchKeys(context.Background(), func() (string, string) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.settings.VoiceTeamKey, a.settings.VoiceAllKey
+	})
 	return a
 }
 
@@ -324,9 +339,46 @@ func (a *App) watch(ctx context.Context, c *client.Client) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			a.syncShare(ctx, c.Status())
+			st := c.Status()
+			a.syncVoice(ctx, st)
+			a.syncShare(ctx, st)
 		}
 	}
+}
+
+// syncVoice lets other members' apps reach this one for voice chat.
+func (a *App) syncVoice(ctx context.Context, st client.Status) {
+	ip, err := netip.ParseAddr(st.IP)
+	if st.State != client.StateConnected || err != nil {
+		return
+	}
+	a.mu.Lock()
+	same := a.voiceIP == ip
+	a.mu.Unlock()
+	if same {
+		return
+	}
+	err = a.Voice.Listen(ctx, ip)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil {
+		a.voiceErr = err.Error()
+		return
+	}
+	a.voiceIP, a.voiceErr = ip, ""
+}
+
+// UpdateVoice changes the voice chat settings.
+func (a *App) UpdateVoice(team int, mode, teamKey, allKey string) error {
+	if team < 1 || team > 4 || (mode != "ptt" && mode != "open") || !voice.ValidKey(teamKey) || !voice.ValidKey(allKey) {
+		return errors.New("invalid voice settings")
+	}
+	a.mu.Lock()
+	a.settings.VoiceTeam, a.settings.VoiceMode = team, mode
+	a.settings.VoiceTeamKey, a.settings.VoiceAllKey = teamKey, allKey
+	s := a.settings
+	a.mu.Unlock()
+	return config.Save(s)
 }
 
 func (a *App) syncShare(ctx context.Context, st client.Status) {
@@ -388,10 +440,12 @@ func (a *App) Disconnect() {
 	cancel, c, mapping, sh := a.cancel, a.client, a.mapping, a.share
 	a.cancel, a.srv, a.mapping, a.share, a.hosting = nil, nil, nil, nil, nil
 	a.shareIP, a.shareErr = netip.Addr{}, ""
+	a.voiceIP, a.voiceErr = netip.Addr{}, ""
 	a.mu.Unlock()
 	if cancel == nil {
 		return
 	}
+	a.Voice.Close()
 	if sh != nil {
 		sh.Close()
 	}
@@ -425,6 +479,9 @@ func (a *App) State() State {
 		Running:  a.cancel != nil,
 		Logs:     append([]string(nil), a.logs...),
 		Share:    ShareState{Active: a.share != nil, Error: a.shareErr},
+
+		VoiceKeys:  voice.Keys,
+		VoiceError: a.voiceErr,
 	}
 	if a.share != nil {
 		st.Share.URL = "http://" + a.share.Addr + "/"

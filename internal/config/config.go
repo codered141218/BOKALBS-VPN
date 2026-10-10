@@ -27,6 +27,27 @@ type Settings struct {
 	ShareFolder  string `json:"shareFolder"`
 
 	RelayOnly bool `json:"relayOnly"`
+
+	// Voice chat.
+	VoiceTeam    int    `json:"voiceTeam"`    // 1-4: who hears "talk to team"
+	VoiceMode    string `json:"voiceMode"`    // "ptt" (push to talk) or "open" (open mic to team)
+	VoiceTeamKey string `json:"voiceTeamKey"` // push-to-talk key for the team (voice.Keys ID)
+	VoiceAllKey  string `json:"voiceAllKey"`  // push-to-talk key for everyone
+}
+
+func (s *Settings) voiceDefaults() {
+	if s.VoiceTeam < 1 || s.VoiceTeam > 4 {
+		s.VoiceTeam = 1
+	}
+	if s.VoiceMode != "open" {
+		s.VoiceMode = "ptt"
+	}
+	if s.VoiceTeamKey == "" {
+		s.VoiceTeamKey = "backquote"
+	}
+	if s.VoiceAllKey == "" {
+		s.VoiceAllKey = "capslock"
+	}
 }
 
 type stored struct {
@@ -48,7 +69,9 @@ func path() string { return filepath.Join(Dir(), "settings.json") }
 // Defaults returns settings for a first run.
 func Defaults() Settings {
 	name, _ := os.Hostname()
-	return Settings{Nickname: name, HostPort: 47820, UPnP: true, ClientID: newID()}
+	s := Settings{Nickname: name, HostPort: 47820, UPnP: true, ClientID: newID()}
+	s.voiceDefaults()
+	return s
 }
 
 func newID() string {
@@ -76,6 +99,7 @@ func Load() Settings {
 	if out.HostPort == 0 {
 		out.HostPort = 47820
 	}
+	out.voiceDefaults()
 	out.Password = ""
 	if st.ProtectedPassword != "" {
 		if raw, err := base64.StdEncoding.DecodeString(st.ProtectedPassword); err == nil {

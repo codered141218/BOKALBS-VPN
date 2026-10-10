@@ -37,9 +37,13 @@ type UI struct {
 
 // Start listens on a random local port.
 func Start(a *app.App) (*UI, error) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	// A fixed address lets the window remember permissions such as the
+	// microphone (for voice chat) between runs.
+	ln, err := net.Listen("tcp4", "127.0.0.1:47823")
 	if err != nil {
-		return nil, err
+		if ln, err = net.Listen("tcp4", "127.0.0.1:0"); err != nil {
+			return nil, err
+		}
 	}
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -53,6 +57,9 @@ func Start(a *app.App) (*UI, error) {
 	mux.HandleFunc("/api/pickfolder", u.api(u.pickFolder))
 	mux.HandleFunc("/api/open", u.api(u.open))
 	mux.HandleFunc("/api/quit", u.api(u.quitHandler))
+	mux.HandleFunc("/api/voice/events", u.voiceEvents)
+	mux.HandleFunc("/api/voice/send", u.api(u.voiceSend))
+	mux.HandleFunc("/api/voice/settings", u.api(u.voiceSettings))
 	u.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go u.srv.Serve(ln)
 	return u, nil
@@ -165,6 +172,71 @@ func (u *UI) open(r *http.Request) (any, error) {
 		return nil, openExplorer(`\\` + ip.String())
 	}
 	return nil, errors.New("unknown kind " + strconv.Quote(req.Kind))
+}
+
+// voiceEvents streams voice setup messages and push-to-talk key changes to
+// the window (Server-Sent Events). EventSource cannot set headers, so the
+// token comes in the query.
+func (u *UI) voiceEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Host != u.host || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), []byte(u.token)) != 1 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	events, stop := u.app.Voice.Subscribe()
+	defer stop()
+	ping := time.NewTicker(20 * time.Second)
+	defer ping.Stop()
+	fl.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-events:
+			b, _ := json.Marshal(ev)
+			_, _ = w.Write([]byte("data: "))
+			_, _ = w.Write(b)
+			_, _ = w.Write([]byte("\n\n"))
+			fl.Flush()
+		case <-ping.C:
+			_, _ = w.Write([]byte(": ping\n\n"))
+			fl.Flush()
+		}
+	}
+}
+
+func (u *UI) voiceSend(r *http.Request) (any, error) {
+	var req struct {
+		To  string          `json:"to"`
+		Msg json.RawMessage `json:"msg"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	ip, err := netip.ParseAddr(req.To)
+	if err != nil {
+		return nil, errors.New("invalid address")
+	}
+	return nil, u.app.Voice.Send(r.Context(), ip, req.Msg)
+}
+
+func (u *UI) voiceSettings(r *http.Request) (any, error) {
+	var req struct {
+		Team    int    `json:"team"`
+		Mode    string `json:"mode"`
+		TeamKey string `json:"teamKey"`
+		AllKey  string `json:"allKey"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	return nil, u.app.UpdateVoice(req.Team, req.Mode, req.TeamKey, req.AllKey)
 }
 
 func (u *UI) quitHandler(r *http.Request) (any, error) {
