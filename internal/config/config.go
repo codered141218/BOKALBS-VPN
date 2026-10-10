@@ -35,7 +35,8 @@ type Settings struct {
 	VoiceAllKey  string `json:"voiceAllKey"`  // push-to-talk key for everyone
 }
 
-func (s *Settings) voiceDefaults() {
+// Normalize fills in missing voice chat settings with defaults.
+func (s *Settings) Normalize() {
 	if s.VoiceTeam < 1 || s.VoiceTeam > 4 {
 		s.VoiceTeam = 1
 	}
@@ -70,7 +71,7 @@ func path() string { return filepath.Join(Dir(), "settings.json") }
 func Defaults() Settings {
 	name, _ := os.Hostname()
 	s := Settings{Nickname: name, HostPort: 47820, UPnP: true, ClientID: newID()}
-	s.voiceDefaults()
+	s.Normalize()
 	return s
 }
 
@@ -99,7 +100,7 @@ func Load() Settings {
 	if out.HostPort == 0 {
 		out.HostPort = 47820
 	}
-	out.voiceDefaults()
+	out.Normalize()
 	out.Password = ""
 	if st.ProtectedPassword != "" {
 		if raw, err := base64.StdEncoding.DecodeString(st.ProtectedPassword); err == nil {

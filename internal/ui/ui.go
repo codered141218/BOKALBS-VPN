@@ -124,8 +124,10 @@ func (u *UI) connect(r *http.Request) (any, error) {
 	if err := decode(r, &s); err != nil {
 		return nil, err
 	}
+	// The connect form only carries connection settings; keep the rest.
 	cur := u.app.State().Settings
 	s.ShareEnabled, s.ShareFolder = cur.ShareEnabled, cur.ShareFolder
+	s.VoiceTeam, s.VoiceMode, s.VoiceTeamKey, s.VoiceAllKey = cur.VoiceTeam, cur.VoiceMode, cur.VoiceTeamKey, cur.VoiceAllKey
 	return nil, u.app.Connect(s)
 }
 

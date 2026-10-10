@@ -151,6 +151,7 @@ func (a *App) Connect(s config.Settings) error {
 	}
 	prev := a.settings
 	s.ClientID = prev.ClientID
+	s.Normalize()
 	a.settings = s
 	a.gen++
 	gen := a.gen
