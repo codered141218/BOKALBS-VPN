@@ -118,6 +118,7 @@ button.on { background: var(--accent); color: var(--accent-fg); border-color: tr
 .progress.bad div { background: var(--bad); }
 .banner { position: fixed; left: 0; right: 0; top: 0; z-index: 30; background: #c4314b; color: #fff; display: flex; gap: 12px; align-items: center; justify-content: center; padding: 8px 16px; font-weight: 600; }
 .banner button { background: #fff; color: #c4314b; border: 0; }
+body.rc-active header { top: 40px; }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 25; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow), 0 6px 24px rgba(0,0,0,.2); border-radius: 10px; padding: 10px 14px; display: flex; gap: 12px; align-items: center; max-width: calc(100% - 32px); }
 .viewer { position: fixed; inset: 0; z-index: 40; background: #05070b; display: flex; flex-direction: column; }
 .viewer-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -1120,7 +1121,7 @@ function renderBrowser() {
       row.ondblclick = () => download(e);
     }
     row.append(el("div", "fb-icon", fileIcon(e.name, e.dir)), el("div", "nm", e.name),
-      el("div", "sz", e.dir ? "" : human(e.size)), el("div", "dt", new Date(e.modified * 1000).toLocaleString()), act);
+      el("div", "sz", e.dir ? "" : human(e.size)), el("div", "dt", new Date(e.modified * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" })), act);
     rows.push(row);
   }
   if (!rows.length || (rows.length === 1 && parts.length)) rows.push(el("div", "empty", $("fbSearch").value ? "No matches." : "This folder is empty."));
@@ -1266,6 +1267,7 @@ function renderRemote(st) {
   const active = sessions.find((s) => s.incoming && s.state === "active");
   $("rcBanner").classList.toggle("hidden", !active);
   document.body.style.paddingTop = active ? "40px" : "";
+  document.body.classList.toggle("rc-active", !!active);
   if (active) {
     $("rcBannerText").textContent = "🔴 " + active.peerName + (active.control ? " can see and control this PC" : " can see this screen");
     $("rcBannerStop").onclick = () => api("/api/remote/stop", { id: active.id }).then(refresh);
@@ -1431,7 +1433,10 @@ async function runStream(id) {
       }
     }
   } catch (e) {
-    if (RV.id === id) { closeViewer(false); toast("Remote screen disconnected" + (e.message && e.message !== "ended" ? ": " + e.message : ".")); }
+    if (RV.id === id) {
+      closeViewer(false);
+      toast(e.message && e.message !== "ended" ? "Remote screen disconnected: " + e.message : "The remote session ended.");
+    }
   }
 }
 
