@@ -162,6 +162,13 @@ func (h *Hub) Listen(ctx context.Context, ip netip.Addr) error {
 	return nil
 }
 
+// LocalIP is this PC's VPN address (invalid while not listening).
+func (h *Hub) LocalIP() netip.Addr {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ip
+}
+
 // Close stops serving other members.
 func (h *Hub) Close() {
 	h.mu.Lock()

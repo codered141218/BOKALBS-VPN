@@ -33,6 +33,24 @@ type Settings struct {
 	VoiceMode    string `json:"voiceMode"`    // "ptt" (push to talk) or "open" (open mic to team)
 	VoiceTeamKey string `json:"voiceTeamKey"` // push-to-talk key for the team (voice.Keys ID)
 	VoiceAllKey  string `json:"voiceAllKey"`  // push-to-talk key for everyone
+
+	// Remote desktop: let trusted PCs, or anyone with the password, connect
+	// without someone clicking Allow.
+	RemoteUnattended   bool            `json:"remoteUnattended"`
+	RemotePasswordHash string          `json:"-"` // stored, never sent to the window
+	TrustedDevices     []TrustedDevice `json:"trustedDevices"`
+
+	// DeviceKey is this installation's secret identity (Ed25519 seed). Other
+	// PCs remember its public half when they trust this PC.
+	DeviceKey []byte `json:"-"`
+}
+
+// TrustedDevice is a PC allowed to start remote desktop without asking.
+type TrustedDevice struct {
+	Key     string `json:"key"` // public key, base64
+	Name    string `json:"name"`
+	Control bool   `json:"control"` // may use mouse and keyboard (else view only)
+	Added   int64  `json:"added"`   // unix seconds
 }
 
 // Normalize fills in missing voice chat settings with defaults.
@@ -53,7 +71,9 @@ func (s *Settings) Normalize() {
 
 type stored struct {
 	Settings
-	ProtectedPassword string `json:"protectedPassword,omitempty"`
+	ProtectedPassword  string `json:"protectedPassword,omitempty"`
+	ProtectedDeviceKey string `json:"protectedDeviceKey,omitempty"`
+	RemotePasswordHash string `json:"remotePasswordHash,omitempty"`
 }
 
 // Dir returns the folder holding settings and logs.
@@ -70,9 +90,15 @@ func path() string { return filepath.Join(Dir(), "settings.json") }
 // Defaults returns settings for a first run.
 func Defaults() Settings {
 	name, _ := os.Hostname()
-	s := Settings{Nickname: name, HostPort: 47820, UPnP: true, ClientID: newID()}
+	s := Settings{Nickname: name, HostPort: 47820, UPnP: true, ClientID: newID(), DeviceKey: newKey()}
 	s.Normalize()
 	return s
+}
+
+func newKey() []byte {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return b
 }
 
 func newID() string {
@@ -101,6 +127,17 @@ func Load() Settings {
 		out.HostPort = 47820
 	}
 	out.Normalize()
+	out.RemotePasswordHash = st.RemotePasswordHash
+	out.DeviceKey = nil
+	if raw, err := base64.StdEncoding.DecodeString(st.ProtectedDeviceKey); err == nil && len(raw) > 0 {
+		if key, err := unprotect(raw); err == nil && len(key) == 32 {
+			out.DeviceKey = key
+		}
+	}
+	if out.DeviceKey == nil {
+		out.DeviceKey = newKey()
+		// A PC that trusted the old key will ask again; nothing else changes.
+	}
 	out.Password = ""
 	if st.ProtectedPassword != "" {
 		if raw, err := base64.StdEncoding.DecodeString(st.ProtectedPassword); err == nil {
@@ -115,8 +152,13 @@ func Load() Settings {
 // Save writes the settings. The password is only kept if SavePassword is set,
 // and is encrypted for the current Windows user.
 func Save(s Settings) error {
-	st := stored{Settings: s}
+	st := stored{Settings: s, RemotePasswordHash: s.RemotePasswordHash}
 	st.Password = ""
+	if len(s.DeviceKey) == 32 {
+		if raw, err := protect(s.DeviceKey); err == nil {
+			st.ProtectedDeviceKey = base64.StdEncoding.EncodeToString(raw)
+		}
+	}
 	if s.SavePassword && s.Password != "" {
 		if raw, err := protect([]byte(s.Password)); err == nil {
 			st.ProtectedPassword = base64.StdEncoding.EncodeToString(raw)

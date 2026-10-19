@@ -6,11 +6,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
 	"image/jpeg"
 	"io"
 	"net/netip"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +33,7 @@ func TestRemoteSession(t *testing.T) {
 	name := func(ip netip.Addr) string { return map[netip.Addr]string{viewerIP: "Host", targetIP: "Jaina"}[ip] }
 	hv, ht := peer.NewHub(members), peer.NewHub(members)
 	logf := func(f string, a ...any) { t.Logf(f, a...) }
-	viewer, target := New(hv, name, nil, logf), New(ht, name, nil, logf)
+	viewer, target := New(hv, name, nil, logf, nil, nil), New(ht, name, nil, logf, nil, nil)
 	if err := hv.Listen(ctx, viewerIP); err != nil {
 		t.Skip(err)
 	}
@@ -61,7 +64,7 @@ func TestRemoteSession(t *testing.T) {
 	}
 
 	// A denied request.
-	id, err := viewer.Request(ctx, targetIP, true)
+	id, err := viewer.Request(ctx, targetIP, true, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +72,7 @@ func TestRemoteSession(t *testing.T) {
 	if req.PeerName != "Host" || !req.Control || req.ID != id {
 		t.Fatalf("request %+v", req)
 	}
-	if err := target.Answer(ctx, id, false, false); err != nil {
+	if err := target.Answer(ctx, id, false, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if s := next(vEvents, "remote-answer"); s.State != "declined" {
@@ -80,9 +83,9 @@ func TestRemoteSession(t *testing.T) {
 	}
 
 	// An allowed request, with control.
-	id, _ = viewer.Request(ctx, targetIP, true)
+	id, _ = viewer.Request(ctx, targetIP, true, "", false)
 	next(tEvents, "remote-request")
-	if err := target.Answer(ctx, id, true, true); err != nil {
+	if err := target.Answer(ctx, id, true, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if s := next(vEvents, "remote-answer"); s.State != "active" || !s.Control {
@@ -177,7 +180,7 @@ func TestViewOnly(t *testing.T) {
 	members := func(ip netip.Addr) bool { return ip == a || ip == b }
 	ha, hb := peer.NewHub(members), peer.NewHub(members)
 	name := func(netip.Addr) string { return "x" }
-	va, vb := New(ha, name, nil, t.Logf), New(hb, name, nil, t.Logf)
+	va, vb := New(ha, name, nil, t.Logf, nil, nil), New(hb, name, nil, t.Logf, nil, nil)
 	if ha.Listen(ctx, a) != nil || hb.Listen(ctx, b) != nil {
 		t.Skip("cannot listen")
 	}
@@ -185,11 +188,147 @@ func TestViewOnly(t *testing.T) {
 	defer hb.Close()
 	ev, stop := hb.Subscribe()
 	defer stop()
-	id, _ := va.Request(ctx, b, true)
+	id, _ := va.Request(ctx, b, true, "", false)
 	<-ev
-	vb.Answer(ctx, id, true, false) // view only
+	vb.Answer(ctx, id, true, false, false) // view only
 	time.Sleep(200 * time.Millisecond)
 	if err := va.Input(ctx, id, json.RawMessage(`[{"t":"key","k":65}]`)); err == nil {
 		t.Fatal("input allowed in a view-only session")
 	}
+}
+
+type testPolicy struct {
+	mu       sync.Mutex
+	password string
+	trusted  map[string]bool // key -> control
+}
+
+func (p *testPolicy) Trusted(k ed25519.PublicKey) (bool, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c, ok := p.trusted[string(k)]
+	return ok, c
+}
+func (p *testPolicy) CheckPassword(pw string) bool { return p.password != "" && pw == p.password }
+func (p *testPolicy) Trust(k ed25519.PublicKey, name string, control bool) {
+	p.mu.Lock()
+	p.trusted[string(k)] = control
+	p.mu.Unlock()
+}
+
+func TestUnattendedAccess(t *testing.T) {
+	t.Setenv("BOKALBS_FAKE_SCREEN", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vIP, tIP, xIP := netip.MustParseAddr("127.0.0.6"), netip.MustParseAddr("127.0.0.7"), netip.MustParseAddr("127.0.0.8")
+	members := func(ip netip.Addr) bool { return ip == vIP || ip == tIP || ip == xIP }
+	name := func(ip netip.Addr) string { return ip.String() }
+	hv, ht, hx := peer.NewHub(members), peer.NewHub(members), peer.NewHub(members)
+	pol := &testPolicy{password: "office-pc-2026", trusted: map[string]bool{}}
+	viewer := New(hv, name, nil, t.Logf, bytes.Repeat([]byte{1}, 32), nil)
+	target := New(ht, name, nil, t.Logf, nil, pol)
+	other := New(hx, name, nil, t.Logf, bytes.Repeat([]byte{2}, 32), nil)
+	for ip, h := range map[netip.Addr]*peer.Hub{vIP: hv, tIP: ht, xIP: hx} {
+		if err := h.Listen(ctx, ip); err != nil {
+			t.Skip(err)
+		}
+		defer h.Close()
+	}
+	vEv, s1 := hv.Subscribe()
+	defer s1()
+	tEv, s2 := ht.Subscribe()
+	defer s2()
+	xEv, s3 := hx.Subscribe()
+	defer s3()
+	expect := func(ch <-chan peer.Event, kind string) Session {
+		t.Helper()
+		for {
+			select {
+			case ev := <-ch:
+				if ev.Kind == kind {
+					var s Session
+					json.Unmarshal(ev.Msg, &s)
+					return s
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("no %s event", kind)
+			}
+		}
+	}
+	quiet := func(ch <-chan peer.Event, kind string) {
+		t.Helper()
+		deadline := time.After(400 * time.Millisecond)
+		for {
+			select {
+			case ev := <-ch:
+				if ev.Kind == kind {
+					t.Fatalf("unexpected %s", kind)
+				}
+			case <-deadline:
+				return
+			}
+		}
+	}
+
+	// Wrong password: refused, nobody asked.
+	if _, err := viewer.Request(ctx, tIP, true, "guess", false); err == nil || !strings.Contains(err.Error(), "wrong password") {
+		t.Fatalf("wrong password: %v", err)
+	}
+	quiet(tEv, "remote-request")
+
+	// Right password, remember this PC: starts at once, no dialog.
+	id, err := viewer.Request(ctx, tIP, true, "office-pc-2026", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := expect(vEv, "remote-answer"); s.ID != id || s.State != "active" || !s.Control || !s.Unattended {
+		t.Fatalf("answer %+v", s)
+	}
+	if s := expect(tEv, "remote-started"); !s.Unattended || !s.Incoming {
+		t.Fatalf("target sees %+v", s)
+	}
+	if ok, ctl := pol.Trusted(viewer.DeviceKey()); !ok || !ctl {
+		t.Fatal("viewer was not remembered")
+	}
+	target.Stop(ctx, id)
+	expect(vEv, "remote-ended")
+
+	// Trusted now: no password needed, still no dialog.
+	id, err = viewer.Request(ctx, tIP, true, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := expect(vEv, "remote-answer"); s.ID != id || s.State != "active" {
+		t.Fatalf("trusted answer %+v", s)
+	}
+	quiet(tEv, "remote-request")
+	target.Stop(ctx, id)
+	expect(vEv, "remote-ended")
+
+	// Another member with a different device key is asked as usual.
+	oid, err := other.Request(ctx, tIP, true, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(tEv, "remote-request")
+	quiet(xEv, "remote-answer")
+	other.Stop(ctx, oid)
+
+	// Lockout after 5 wrong passwords, even the right one is refused for a while.
+	for i := 0; i < 5; i++ {
+		other.Request(ctx, tIP, true, "nope", false)
+	}
+	if _, err := other.Request(ctx, tIP, true, "office-pc-2026", false); err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("expected lockout, got %v", err)
+	}
+
+	// Removing trust makes the viewer ask again.
+	pol.mu.Lock()
+	pol.trusted = map[string]bool{}
+	pol.mu.Unlock()
+	if _, err := viewer.Request(ctx, tIP, true, "", false); err != nil {
+		t.Fatal(err)
+	}
+	expect(tEv, "remote-request")
+	quiet(vEv, "remote-answer")
 }

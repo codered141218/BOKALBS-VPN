@@ -264,6 +264,24 @@ a { color: var(--accent); }
     </div>
   </section>
 
+  <!-- Remote access to this PC -->
+  <section class="card" id="accessCard">
+    <h2>Remote access to this PC</h2>
+    <p class="hint" style="margin-top:0">Normally you must click <b>Allow</b> when a friend asks to use this PC. Turn this on to let <b>trusted PCs</b>, or anyone who knows the <b>access password</b>, connect without anyone at the PC – like AnyDesk's unattended access. The red bar with <b>Stop</b> still shows whenever someone is connected.</p>
+    <div class="check"><input type="checkbox" id="raOn"><span>Allow access without asking</span></div>
+    <label for="raPw">Access password</label>
+    <div class="row">
+      <input class="grow" type="password" id="raPw" autocomplete="new-password" placeholder="at least 8 characters">
+      <button class="small" id="raSet">Set password</button>
+    </div>
+    <p class="hint" id="raPwState"></p>
+    <div class="msg" id="raMsg"></div>
+    <div class="peer-sub" style="font-weight:600;margin-top:12px">Trusted PCs (connect without password or asking)</div>
+    <ul class="peers" id="raTrusted"></ul>
+    <div class="empty" id="raNoTrusted">None yet. A PC becomes trusted when you tick “Always allow” on a request, or when someone connects with the password and “Remember this PC”.</div>
+    <p class="hint">This PC's ID: <b id="raId"></b> – others see this ID in their trusted list.</p>
+  </section>
+
   <!-- Share -->
   <section class="card">
     <h2>Share a folder</h2>
@@ -351,12 +369,29 @@ a { color: var(--accent); }
   </div>
 </div>
 
+<!-- Connect to a player's PC -->
+<div class="backdrop hidden" id="rcModal">
+  <div class="modal">
+    <h2 id="rcTitle">Connect to PC</h2>
+    <p class="hint" style="margin-top:0" id="rcHint"></p>
+    <label for="rcPw">Access password <span style="font-weight:400">(only if they set one – leave empty to ask them)</span></label>
+    <input type="password" id="rcPw" autocomplete="off" placeholder="leave empty to send a request">
+    <div class="check"><input type="checkbox" id="rcRemember" checked><span>Remember this PC on their computer, so next time no password or Allow is needed</span></div>
+    <div class="check"><input type="checkbox" id="rcViewOnly"><span>View only (don't use their mouse and keyboard)</span></div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary grow" id="rcGo">Connect</button>
+      <button class="grow" id="rcCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- Incoming remote desktop request -->
 <div class="backdrop hidden" id="rrModal">
   <div class="modal">
     <h2 id="rrTitle">Remote desktop request</h2>
     <p id="rrText"></p>
     <p class="hint">Only allow people you trust. You'll see a red bar while it's running and can stop it at any time.</p>
+    <div class="check"><input type="checkbox" id="rrTrust"><span id="rrTrustLabel">Always allow from this PC (don't ask again)</span></div>
     <div class="row" style="margin-top:14px;flex-wrap:wrap">
       <button class="primary grow" id="rrAllow">Allow control</button>
       <button class="grow" id="rrView">View only</button>
@@ -638,6 +673,7 @@ function render(st) {
   renderTransfers(st);
   renderOffers(st);
   renderRemote(st);
+  renderAccess(st);
 
   const sh = st.share;
   if (!shareDirty && document.activeElement !== $("shareFolder")) {
@@ -1230,12 +1266,29 @@ function toast(text, btn, onBtn, sticky) {
 }
 function hideToast() { $("toast").classList.add("hidden"); }
 
-async function requestRemote(ip, name) {
-  try {
-    const r = await api("/api/remote/request", { ip, control: true });
-    toast("Asking " + name + " to share their screen…", "Cancel", () => api("/api/remote/stop", { id: r.id }), true);
-    refresh();
-  } catch (e) { alert(e.message); }
+function requestRemote(ip, name) {
+  $("rcTitle").textContent = "Connect to " + name + "'s PC";
+  $("rcHint").textContent = "Without a password, " + name + " is asked to allow it – unless your PC is already trusted there, then it connects right away.";
+  $("rcPw").value = "";
+  $("rcViewOnly").checked = false;
+  $("rcModal").classList.remove("hidden");
+  $("rcPw").focus();
+  const go = async () => {
+    $("rcModal").classList.add("hidden");
+    const password = $("rcPw").value;
+    $("rcPw").value = "";
+    try {
+      const r = await api("/api/remote/request", {
+        ip, control: !$("rcViewOnly").checked, password, remember: $("rcRemember").checked,
+      });
+      toast(password ? "Connecting to " + name + "'s PC…" : "Connecting – " + name + " may need to click Allow…",
+        "Cancel", () => api("/api/remote/stop", { id: r.id }), true);
+      refresh();
+    } catch (e) { alert(e.message); }
+  };
+  $("rcGo").onclick = go;
+  $("rcPw").onkeydown = (e) => { if (e.key === "Enter") go(); };
+  $("rcCancel").onclick = () => $("rcModal").classList.add("hidden");
 }
 
 const RV = { id: "", seen: {}, reader: null, inputQ: [], sending: false, keys: new Set(), w: 0, h: 0 };
@@ -1251,9 +1304,12 @@ function renderRemote(st) {
       ? "With “Allow control” " + ask.peerName + " can move your mouse and type on this PC. “View only” lets them watch without touching anything."
       : ask.peerName + " will see everything on your screen.";
     $("rrAllow").classList.toggle("hidden", !ask.control);
+    $("rrTrust").checked = false;
+    $("rrTrustLabel").textContent = "Always allow " + ask.peerName + " from this PC (don't ask again)";
     const answer = (allow, control) => {
       $("rrModal").classList.add("hidden");
-      api("/api/remote/answer", { id: ask.id, allow, control }).then(refresh).catch((e) => alert(e.message));
+      api("/api/remote/answer", { id: ask.id, allow, control, trust: allow && $("rrTrust").checked })
+        .then(refresh).catch((e) => alert(e.message));
     };
     $("rrAllow").onclick = () => answer(true, true);
     $("rrView").onclick = () => answer(true, false);
@@ -1269,7 +1325,8 @@ function renderRemote(st) {
   document.body.style.paddingTop = active ? "40px" : "";
   document.body.classList.toggle("rc-active", !!active);
   if (active) {
-    $("rcBannerText").textContent = "🔴 " + active.peerName + (active.control ? " can see and control this PC" : " can see this screen");
+    $("rcBannerText").textContent = "🔴 " + active.peerName + (active.control ? " can see and control this PC" : " can see this screen") +
+      (active.unattended ? " (connected without asking)" : "");
     $("rcBannerStop").onclick = () => api("/api/remote/stop", { id: active.id }).then(refresh);
   }
 
@@ -1440,13 +1497,52 @@ async function runStream(id) {
   }
 }
 
+// --- remote access to this PC (unattended) ---
+function renderAccess(st) {
+  $("raOn").checked = !!st.settings.remoteUnattended;
+  $("raPwState").textContent = st.remotePasswordSet ? "A password is set. Type a new one to change it." : "No password set yet.";
+  $("raId").textContent = st.deviceId || "";
+  const list = st.trusted || [];
+  $("raNoTrusted").classList.toggle("hidden", list.length > 0);
+  const key = list.map((d) => d.key + d.control).join();
+  if ($("raTrusted").dataset.key === key) return;
+  $("raTrusted").dataset.key = key;
+  $("raTrusted").replaceChildren(...list.map((d) => {
+    const li = el("li");
+    const main = el("div", "peer-main");
+    main.append(el("div", "peer-name", d.name),
+      el("div", "peer-sub", "ID " + d.id + " · " + (d.control ? "can control" : "view only") + " · added " + new Date(d.added * 1000).toLocaleDateString()));
+    const rm = el("button", "small danger", "Remove");
+    rm.onclick = () => api("/api/remote/untrust", { key: d.key }).then(refresh).catch((e) => alert(e.message));
+    li.append(main, rm);
+    return li;
+  }));
+}
+async function saveAccess(password) {
+  setMsg($("raMsg"), "", "");
+  try {
+    await api("/api/remote/access", { enabled: $("raOn").checked, password: password || "" });
+    if (password) { $("raPw").value = ""; setMsg($("raMsg"), "ok", "Access password saved."); }
+  } catch (e) {
+    $("raOn").checked = false;
+    setMsg($("raMsg"), "bad", e.message);
+  }
+  refresh();
+}
+$("raOn").onchange = () => saveAccess($("raPw").value);
+$("raSet").onclick = () => {
+  if (!$("raPw").value) { setMsg($("raMsg"), "bad", "Type a password first."); return; }
+  saveAccess($("raPw").value);
+};
+
 // React at once to events instead of waiting for the next refresh.
 (function remoteEvents() {
   const es = new EventSource("/api/voice/events?t=" + encodeURIComponent(token));
   es.onmessage = (e) => {
     let ev;
     try { ev = JSON.parse(e.data); } catch (err) { return; }
-    if (["file-offer", "remote-request", "remote-answer", "remote-ended"].includes(ev.kind)) refresh();
+    if (["file-offer", "remote-request", "remote-answer", "remote-ended", "remote-started"].includes(ev.kind)) refresh();
+    if (ev.kind === "remote-started") chime();
   };
   es.onerror = () => { es.close(); setTimeout(remoteEvents, 2000); };
 })();

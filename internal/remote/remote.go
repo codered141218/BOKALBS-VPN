@@ -11,11 +11,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"io"
@@ -37,10 +39,42 @@ type Session struct {
 	Control  bool   `json:"control"` // mouse and keyboard allowed
 	State    string `json:"state"`   // asking, active, declined, ended
 	Error    string `json:"error,omitempty"`
+	// Unattended is true when it started without anyone clicking Allow
+	// (trusted PC or access password).
+	Unattended bool `json:"unattended,omitempty"`
 
 	token  string
 	cancel context.CancelFunc
 	ended  time.Time
+	pub    ed25519.PublicKey // requester's device key (incoming sessions)
+}
+
+// Policy decides about requests without asking the person at the PC.
+type Policy interface {
+	// Trusted reports whether a device key may connect without asking, and
+	// whether it may control the PC (else view only).
+	Trusted(key ed25519.PublicKey) (ok, control bool)
+	// CheckPassword reports whether unattended access is on and pw is its
+	// password.
+	CheckPassword(pw string) bool
+	// Trust remembers a device key as a trusted PC.
+	Trust(key ed25519.PublicKey, name string, control bool)
+}
+
+// request is what a viewer sends to ask for a session. It is signed with
+// the viewer's device key so a trusted PC can't be impersonated.
+type request struct {
+	ID       string `json:"id"`
+	Control  bool   `json:"control"`
+	Key      []byte `json:"key"` // Ed25519 public key
+	Time     int64  `json:"time"`
+	Sig      []byte `json:"sig"`
+	Password string `json:"password,omitempty"` // unattended access password
+	Remember bool   `json:"remember,omitempty"` // ask to be trusted next time
+}
+
+func signedBytes(id string, target netip.Addr, t int64, control bool) []byte {
+	return []byte(fmt.Sprintf("bokalbs-remote-v1\x00%s\x00%s\x00%d\x00%t", id, target, t, control))
 }
 
 // InputEvent is mouse or keyboard input from the viewer. X and Y are
@@ -61,14 +95,24 @@ type Manager struct {
 	nameOf    func(netip.Addr) string
 	attention func()
 	logf      func(string, ...any)
+	key       ed25519.PrivateKey
+	policy    Policy
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	failures map[string][]time.Time // wrong passwords per member
 }
 
 // New creates a manager and registers its requests on the peer channel.
-func New(hub *peer.Hub, nameOf func(netip.Addr) string, attention func(), logf func(string, ...any)) *Manager {
-	m := &Manager{hub: hub, nameOf: nameOf, attention: attention, logf: logf, sessions: map[string]*Session{}}
+// deviceKey is this installation's Ed25519 seed; policy may be nil (always
+// ask).
+func New(hub *peer.Hub, nameOf func(netip.Addr) string, attention func(), logf func(string, ...any), deviceKey []byte, policy Policy) *Manager {
+	if len(deviceKey) != ed25519.SeedSize {
+		deviceKey = make([]byte, ed25519.SeedSize)
+		_, _ = rand.Read(deviceKey)
+	}
+	m := &Manager{hub: hub, nameOf: nameOf, attention: attention, logf: logf, key: ed25519.NewKeyFromSeed(deviceKey),
+		policy: policy, sessions: map[string]*Session{}, failures: map[string][]time.Time{}}
 	hub.Handle("/remote/request", m.serveRequest)
 	hub.Handle("/remote/answer", m.serveAnswer)
 	hub.Handle("/remote/stop", m.serveStop)
@@ -116,24 +160,37 @@ func (m *Manager) end(s *Session, state, errMsg string) {
 
 // ----- viewer side -----
 
-// Request asks a member to share their screen.
-func (m *Manager) Request(ctx context.Context, ip netip.Addr, control bool) (string, error) {
+// DeviceKey returns this PC's public device key.
+func (m *Manager) DeviceKey() ed25519.PublicKey { return m.key.Public().(ed25519.PublicKey) }
+
+// Request asks a member to share their screen. With the member's access
+// password (or when this PC is trusted there) it starts without anyone
+// clicking Allow; remember asks the member's PC to trust this one from now on.
+func (m *Manager) Request(ctx context.Context, ip netip.Addr, control bool, password string, remember bool) (string, error) {
 	s := &Session{ID: newID(), PeerIP: ip.String(), PeerName: m.nameOf(ip), Control: control, State: "asking"}
-	if err := m.hub.Post(ctx, ip, "/remote/request", map[string]any{"id": s.ID, "control": control}); err != nil {
-		return "", err
-	}
+	now := time.Now().Unix()
+	req := request{ID: s.ID, Control: control, Key: m.DeviceKey(), Time: now,
+		Sig: ed25519.Sign(m.key, signedBytes(s.ID, ip, now, control)), Password: password, Remember: remember}
+	// Registered first: an automatic answer may arrive before Post returns.
 	m.mu.Lock()
 	m.sessions[s.ID] = s
 	m.mu.Unlock()
+	if err := m.hub.Post(ctx, ip, "/remote/request", req); err != nil {
+		m.mu.Lock()
+		delete(m.sessions, s.ID)
+		m.mu.Unlock()
+		return "", err
+	}
 	return s.ID, nil
 }
 
 func (m *Manager) serveAnswer(w http.ResponseWriter, r *http.Request, from netip.Addr) {
 	var a struct {
-		ID      string `json:"id"`
-		Accept  bool   `json:"accept"`
-		Control bool   `json:"control"`
-		Token   string `json:"token"`
+		ID         string `json:"id"`
+		Accept     bool   `json:"accept"`
+		Control    bool   `json:"control"`
+		Token      string `json:"token"`
+		Unattended bool   `json:"unattended"`
 	}
 	if r.Method != http.MethodPost || peer.ReadJSON(r, &a) != nil {
 		http.Error(w, "bad answer", http.StatusBadRequest)
@@ -147,7 +204,7 @@ func (m *Manager) serveAnswer(w http.ResponseWriter, r *http.Request, from netip
 		return
 	}
 	if a.Accept {
-		s.State, s.token, s.Control = "active", a.Token, s.Control && a.Control
+		s.State, s.token, s.Control, s.Unattended = "active", a.Token, s.Control && a.Control, a.Unattended
 	} else {
 		s.State, s.ended = "declined", time.Now()
 	}
@@ -212,35 +269,113 @@ func (m *Manager) Input(ctx context.Context, id string, events json.RawMessage) 
 // ----- the side being viewed -----
 
 func (m *Manager) serveRequest(w http.ResponseWriter, r *http.Request, from netip.Addr) {
-	var req struct {
-		ID      string `json:"id"`
-		Control bool   `json:"control"`
-	}
+	var req request
 	if r.Method != http.MethodPost || peer.ReadJSON(r, &req) != nil || len(req.ID) != 32 {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	// The device key is only taken into account when the signature proves
+	// the requester holds it, for this PC, recently.
+	var key ed25519.PublicKey
+	if len(req.Key) == ed25519.PublicKeySize && len(req.Sig) == ed25519.SignatureSize &&
+		abs(time.Now().Unix()-req.Time) < 300 && m.hub.LocalIP().IsValid() &&
+		ed25519.Verify(req.Key, signedBytes(req.ID, m.hub.LocalIP(), req.Time, req.Control), req.Sig) {
+		key = ed25519.PublicKey(req.Key)
+	}
+
+	name := m.nameOf(from)
+	auto, control := false, req.Control
+	if m.policy != nil && key != nil {
+		if ok, ctl := m.policy.Trusted(key); ok {
+			auto, control = true, req.Control && ctl
+		}
+	}
+	if !auto && req.Password != "" {
+		if m.locked(from) {
+			http.Error(w, "too many wrong passwords; try again in a few minutes", http.StatusTooManyRequests)
+			return
+		}
+		if m.policy == nil || !m.policy.CheckPassword(req.Password) {
+			m.failed(from)
+			m.logf("remote desktop: %s tried a wrong access password", name)
+			http.Error(w, "wrong password, or access without asking is turned off on that PC", http.StatusForbidden)
+			return
+		}
+		auto = true
+		if req.Remember && key != nil {
+			m.policy.Trust(key, name, req.Control)
+			m.logf("remote desktop: %s is now a trusted PC", name)
+		}
+	}
+
+	s := &Session{ID: req.ID, Incoming: true, PeerIP: from.String(), PeerName: name, Control: control, State: "asking", pub: key}
 	m.mu.Lock()
-	for _, s := range m.sessions {
-		if s.Incoming && (s.State == "active" || (s.State == "asking" && s.PeerIP == from.String())) {
+	if _, dup := m.sessions[req.ID]; dup {
+		m.mu.Unlock()
+		http.Error(w, "duplicate request", http.StatusConflict)
+		return
+	}
+	for _, o := range m.sessions {
+		if o.Incoming && (o.State == "active" || (o.State == "asking" && o.PeerIP == from.String())) {
 			m.mu.Unlock()
 			http.Error(w, "this PC is already in a remote session", http.StatusConflict)
 			return
 		}
 	}
-	s := &Session{ID: req.ID, Incoming: true, PeerIP: from.String(), PeerName: m.nameOf(from), Control: req.Control, State: "asking"}
 	m.sessions[s.ID] = s
-	cp := *s
 	m.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+	if auto {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := m.answer(ctx, s.ID, true, control, false, true); err != nil {
+				m.logf("remote desktop: %v", err)
+			}
+		}()
+		return
+	}
+	cp := *s
 	m.publish("remote-request", &cp)
 	if m.attention != nil {
 		m.attention()
 	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
-// Answer allows (with or without control) or denies a request.
-func (m *Manager) Answer(ctx context.Context, id string, allow, control bool) error {
+func abs(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// locked reports whether a member made too many wrong guesses lately.
+func (m *Manager) locked(from netip.Addr) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var recent []time.Time
+	for _, t := range m.failures[from.String()] {
+		if time.Since(t) < 5*time.Minute {
+			recent = append(recent, t)
+		}
+	}
+	m.failures[from.String()] = recent
+	return len(recent) >= 5
+}
+
+func (m *Manager) failed(from netip.Addr) {
+	m.mu.Lock()
+	m.failures[from.String()] = append(m.failures[from.String()], time.Now())
+	m.mu.Unlock()
+}
+
+// Answer allows (with or without control) or denies a request. With trust,
+// the requesting PC may connect without asking from now on.
+func (m *Manager) Answer(ctx context.Context, id string, allow, control, trust bool) error {
+	return m.answer(ctx, id, allow, control, trust, false)
+}
+
+func (m *Manager) answer(ctx context.Context, id string, allow, control, trust, unattended bool) error {
 	m.mu.Lock()
 	s := m.sessions[id]
 	if s == nil || !s.Incoming || s.State != "asking" {
@@ -248,17 +383,30 @@ func (m *Manager) Answer(ctx context.Context, id string, allow, control bool) er
 		return errors.New("this request is no longer waiting")
 	}
 	if allow {
-		s.State, s.Control, s.token = "active", s.Control && control, newID()
+		s.State, s.Control, s.token, s.Unattended = "active", s.Control && control, newID(), unattended
 	} else {
 		s.State, s.ended = "declined", time.Now()
 	}
 	cp := *s
 	m.mu.Unlock()
 	if allow {
-		m.logf("remote desktop: %s can now see%s this PC", cp.PeerName, map[bool]string{true: " and control", false: ""}[cp.Control])
+		how := ""
+		if unattended {
+			how = " (without asking)"
+		}
+		m.logf("remote desktop: %s can now see%s this PC%s", cp.PeerName, map[bool]string{true: " and control", false: ""}[cp.Control], how)
+		if unattended {
+			m.publish("remote-started", &cp)
+			if m.attention != nil {
+				m.attention()
+			}
+		}
+	}
+	if allow && trust && m.policy != nil && s.pub != nil {
+		m.policy.Trust(s.pub, cp.PeerName, cp.Control)
 	}
 	return m.hub.Post(ctx, netip.MustParseAddr(cp.PeerIP), "/remote/answer",
-		map[string]any{"id": id, "accept": allow, "control": cp.Control, "token": cp.token})
+		map[string]any{"id": id, "accept": allow, "control": cp.Control, "token": cp.token, "unattended": unattended})
 }
 
 // Stop ends a session from this side and tells the other side.

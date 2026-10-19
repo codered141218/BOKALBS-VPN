@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +71,20 @@ type State struct {
 	FileOffers  []files.Offer    `json:"fileOffers"`
 	DownloadDir string           `json:"downloadDir"`
 	Remote      []remote.Session `json:"remote"`
+
+	// Remote access to this PC without asking.
+	RemotePasswordSet bool          `json:"remotePasswordSet"`
+	DeviceID          string        `json:"deviceId"` // this PC's fingerprint
+	Trusted           []TrustedView `json:"trusted"`
+}
+
+// TrustedView shows a trusted PC in the window.
+type TrustedView struct {
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+	Control bool   `json:"control"`
+	Added   int64  `json:"added"`
 }
 
 // App is the application state machine.
@@ -121,7 +136,8 @@ func New(version string) *App {
 		defer a.mu.Unlock()
 		return a.settings.Nickname
 	}, a.attention)
-	a.Remote = remote.New(a.Peer, a.MemberName, a.attention, a.Logf)
+	a.Remote = remote.New(a.Peer, a.MemberName, a.attention, a.Logf, a.settings.DeviceKey, remotePolicy{a})
+	_ = config.Save(a.settings) // keeps a newly created device key
 	go voice.WatchKeys(context.Background(), a.Peer, func() (string, string) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -170,9 +186,13 @@ func (a *App) Connect(s config.Settings) error {
 		a.mu.Unlock()
 		return errors.New("already connected; disconnect first")
 	}
-	prev := a.settings
-	s.ClientID = prev.ClientID
-	s.Normalize()
+	// Only the connection settings come from the form; keep everything else.
+	merged := a.settings
+	merged.Nickname, merged.ServerAddress, merged.NetworkName = s.Nickname, s.ServerAddress, s.NetworkName
+	merged.Password, merged.SavePassword, merged.RelayOnly = s.Password, s.SavePassword, s.RelayOnly
+	merged.Host, merged.HostPort, merged.UPnP = s.Host, s.HostPort, s.UPnP
+	merged.Normalize()
+	s = merged
 	a.settings = s
 	a.gen++
 	gen := a.gen
@@ -508,6 +528,14 @@ func (a *App) State() State {
 		VoiceError: a.peerErr,
 
 		DownloadDir: files.DownloadDir(),
+
+		RemotePasswordSet: a.settings.RemotePasswordHash != "",
+		DeviceID:          Fingerprint(a.Remote.DeviceKey()),
+		Trusted:           []TrustedView{},
+	}
+	for _, d := range a.settings.TrustedDevices {
+		k, _ := base64.StdEncoding.DecodeString(d.Key)
+		st.Trusted = append(st.Trusted, TrustedView{Key: d.Key, Name: d.Name, ID: Fingerprint(k), Control: d.Control, Added: d.Added})
 	}
 	if a.share != nil {
 		st.Share.URL = "http://" + a.share.Addr + "/"

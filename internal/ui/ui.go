@@ -76,6 +76,8 @@ func Start(a *app.App) (*UI, error) {
 	mux.HandleFunc("/api/remote/stop", u.api(u.remoteStop))
 	mux.HandleFunc("/api/remote/input", u.api(u.remoteInput))
 	mux.HandleFunc("/api/remote/stream", u.remoteStream)
+	mux.HandleFunc("/api/remote/access", u.api(u.remoteAccess))
+	mux.HandleFunc("/api/remote/untrust", u.api(u.remoteUntrust))
 	u.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go u.srv.Serve(ln)
 	return u, nil
@@ -382,8 +384,10 @@ func (u *UI) filesClear(r *http.Request) (any, error) {
 
 func (u *UI) remoteRequest(r *http.Request) (any, error) {
 	var req struct {
-		IP      string `json:"ip"`
-		Control bool   `json:"control"`
+		IP       string `json:"ip"`
+		Control  bool   `json:"control"`
+		Password string `json:"password"`
+		Remember bool   `json:"remember"`
 	}
 	if err := decode(r, &req); err != nil {
 		return nil, err
@@ -392,7 +396,7 @@ func (u *UI) remoteRequest(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	id, err := u.app.Remote.Request(r.Context(), ip, req.Control)
+	id, err := u.app.Remote.Request(r.Context(), ip, req.Control, req.Password, req.Remember)
 	return map[string]string{"id": id}, err
 }
 
@@ -401,11 +405,12 @@ func (u *UI) remoteAnswer(r *http.Request) (any, error) {
 		ID      string `json:"id"`
 		Allow   bool   `json:"allow"`
 		Control bool   `json:"control"`
+		Trust   bool   `json:"trust"`
 	}
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	return nil, u.app.Remote.Answer(r.Context(), req.ID, req.Allow, req.Control)
+	return nil, u.app.Remote.Answer(r.Context(), req.ID, req.Allow, req.Control, req.Trust)
 }
 
 func (u *UI) remoteStop(r *http.Request) (any, error) {
@@ -446,4 +451,23 @@ func (u *UI) remoteStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 	}
+}
+
+func (u *UI) remoteAccess(r *http.Request) (any, error) {
+	var req struct {
+		Enabled  bool   `json:"enabled"`
+		Password string `json:"password"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	return nil, u.app.SetRemoteAccess(req.Enabled, req.Password)
+}
+
+func (u *UI) remoteUntrust(r *http.Request) (any, error) {
+	var req struct{ Key string }
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	return nil, u.app.Untrust(req.Key)
 }
